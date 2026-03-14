@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>全球作物易发病害可视化</title>
+    
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 引入相关依赖: 将全部 unpkg 替换为国内极度稳定的 jsdelivr CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.32.1/dist/globe.gl.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #f8fafc; font-family: 'Segoe UI', system-ui, sans-serif; }
+        
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.5); }
+
+        .perspective-1000 { perspective: 1000px; }
+        .transform-style-3d { transform-style: preserve-3d; transition: transform 0.6s cubic-bezier(0.4, 0.2, 0.2, 1); }
+        .backface-hidden { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+        .rotate-y-180 { transform: rotateY(180deg); }
+        
+        .timeline-line::before {
+            content: ''; position: absolute; top: 24px; left: 50%; transform: translateX(-50%); width: 2px; height: calc(100% - 30px); background-color: #e2e8f0; z-index: -1;
+        }
+
+        .slide-up { transform: translateY(100%); transition: transform 0.3s ease-out; }
+        .slide-up.active { transform: translateY(0); }
+        .slide-right { transform: translateX(100%); transition: transform 0.3s ease-out; }
+        .slide-right.active { transform: translateX(0); }
+        .fade-in { opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+        .fade-in.active { opacity: 1; pointer-events: auto; }
+        
+        /* 闪烁加载动画 */
+        .shimmer {
+            background: linear-gradient(90deg, #f0fdf4 0%, #d1fae5 50%, #f0fdf4 100%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite linear;
+        }
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+    </style>
+</head>
+<body class="text-slate-800 w-screen h-screen">
+
+    <!-- 3D 地球容器 -->
+    <div id="globeViz" class="absolute inset-0 z-0 cursor-move"></div>
+
+    <!-- 顶部导航栏 / 控制面板 -->
+    <header class="fixed top-0 left-0 w-full z-10 pointer-events-none p-4 flex justify-between items-start md:items-center flex-col md:flex-row gap-4">
+        <div class="glass px-6 py-3 rounded-2xl shadow-md pointer-events-auto">
+            <h1 class="text-xl md:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-600 to-teal-600 flex items-center gap-2">
+                <i data-lucide="leaf" class="w-6 h-6 text-emerald-500"></i>
+                全球作物易发病害
+            </h1>
+            <p class="text-xs text-slate-500 mt-1 font-medium">探索各国优势作物，结合 Gemini大模型进行农业病害推演</p>
+            <!-- 数据来源致谢声明 -->
+            <p class="text-[10px] text-slate-400 mt-1.5">
+                数据来源详见 
+                <a href="https://www.nature.com/articles/s41597-024-03259-0" target="_blank" class="text-emerald-500 hover:text-emerald-600 underline decoration-emerald-500/30 underline-offset-2 transition-colors pointer-events-auto">
+                    CROPGRIDS: a global geo-referenced dataset of 173 crops | Scientific Data
+                </a>
+            </p>
+        </div>
+
+        <div class="flex flex-col items-end gap-2 pointer-events-auto">
+            <!-- 最近查看 -->
+            <div class="glass px-4 py-2 rounded-xl shadow-sm text-xs w-full max-w-[200px]">
+                <div class="text-slate-500 mb-1 flex items-center gap-1 font-semibold"><i data-lucide="history" class="w-3 h-3"></i> 最近查看:</div>
+                <div id="recentCountries" class="flex flex-wrap gap-1">
+                    <span class="text-slate-400 italic">暂无记录</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 加载指示器 -->
+    <div id="loading" class="fade-in active bg-white/90 fixed inset-0 z-50 flex items-center justify-center">
+        <div class="flex flex-col items-center">
+            <i data-lucide="loader-2" class="w-10 h-10 text-emerald-500 animate-spin mb-4"></i>
+            <p class="text-emerald-700 font-bold tracking-widest" id="loadingText">初始化地球与数据中...</p>
+        </div>
+    </div>
+
+    <!-- 国家详情面板 -->
+    <aside id="countryPanel" class="glass shadow-2xl flex flex-col slide-up md:slide-right fixed bottom-0 md:bottom-auto md:top-0 md:right-0 w-full md:w-[400px] h-[60vh] md:h-full z-20 rounded-t-3xl md:rounded-none md:rounded-l-3xl">
+        <!-- 面板头部 -->
+        <div class="p-6 border-b border-slate-200/50 flex justify-between items-center relative bg-white/50 rounded-t-3xl md:rounded-none md:rounded-tl-3xl">
+            <div class="w-12 h-1.5 bg-slate-300 rounded-full absolute top-3 left-1/2 -translate-x-1/2 md:hidden"></div>
+            <h2 id="countryName" class="text-2xl font-bold text-slate-800 flex items-center gap-2 mt-2 md:mt-0">
+                <i data-lucide="map-pin" class="text-emerald-500"></i> <span id="countryTitleText">选择国家</span>
+            </h2>
+            <button onclick="closeCountryPanel()" class="p-2 hover:bg-slate-200/50 rounded-full transition mt-2 md:mt-0 bg-white shadow-sm">
+                <i data-lucide="x" class="w-5 h-5 text-slate-600"></i>
+            </button>
+        </div>
+
+        <!-- 优势作物列表 -->
+        <div class="p-6 overflow-y-auto no-scrollbar flex-1 bg-white/30">
+            <p class="text-sm text-slate-500 mb-4 flex items-center gap-1 font-medium bg-white/60 p-2 rounded-lg">
+                <i data-lucide="info" class="w-4 h-4 text-blue-400"></i> 点击作物生成 ✨ AI 专属病害报告
+            </p>
+            <div id="cropsList" class="grid grid-cols-2 gap-3">
+                <!-- 动态生成作物卡片 -->
+            </div>
+        </div>
+    </aside>
+
+    <!-- 作物详情与病害弹窗 -->
+    <div id="cropModal" class="fade-in fixed inset-0 z-30 flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onclick="closeCropModal()"></div>
+        <div class="bg-white/95 backdrop-blur-xl w-full max-w-4xl max-h-[90vh] rounded-3xl shadow-2xl relative flex flex-col overflow-hidden z-40">
+            
+            <!-- 弹窗头部 -->
+            <div class="px-8 py-5 border-b border-slate-100 flex justify-between items-center bg-gradient-to-r from-emerald-50 to-teal-50">
+                <h3 id="modalCropName" class="text-2xl font-bold text-emerald-800 flex items-center gap-3">
+                    <span class="p-2 bg-emerald-100 text-emerald-600 rounded-xl shadow-inner"><i data-lucide="sprout"></i></span>
+                    作物名称
+                </h3>
+                <button onclick="closeCropModal()" class="p-2 hover:bg-black/5 rounded-full transition bg-white shadow-sm">
+                    <i data-lucide="x" class="w-6 h-6 text-slate-500"></i>
+                </button>
+            </div>
+
+            <!-- AI 加载状态区域 -->
+            <div id="aiLoadingArea" class="flex-1 flex flex-col items-center justify-center p-12 bg-white hidden">
+                <div class="relative mb-6">
+                    <div class="absolute inset-0 bg-indigo-500 blur-xl opacity-30 rounded-full animate-pulse"></div>
+                    <div class="w-20 h-20 bg-gradient-to-tr from-indigo-500 to-purple-500 rounded-full flex items-center justify-center shadow-lg relative z-10 animate-bounce">
+                        <span class="text-3xl">✨</span>
+                    </div>
+                </div>
+                <h4 class="text-xl font-bold text-slate-700 mb-2" id="aiLoadingStatus">正在召唤 Gemini 农业专家...</h4>
+                <p class="text-slate-500 text-sm font-medium">正在针对该国气候定制生成病害时间轴和历史事件</p>
+                <div class="w-64 h-2 bg-slate-100 rounded-full mt-6 overflow-hidden">
+                    <div class="h-full bg-indigo-500 rounded-full shimmer w-full"></div>
+                </div>
+            </div>
+
+            <!-- 弹窗内容区域 -->
+            <div id="modalContentArea" class="p-8 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-8 hidden">
+                <!-- 左侧：时间轴与病虫害 -->
+                <div>
+                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2 text-slate-700">
+                        <i data-lucide="calendar-clock" class="text-blue-500"></i> 年度生长周期与易发病害
+                    </h4>
+                    <div class="relative timeline-line ml-4" id="timelineContainer">
+                        <!-- 动态生成 4 个季度的时间轴节点 -->
+                    </div>
+
+                    <!-- 当前选中阶段的详细防治方案 -->
+                    <div class="mt-8 p-5 bg-rose-50 rounded-2xl border border-rose-100 transition-all shadow-sm relative overflow-hidden" id="preventionCard">
+                        <div class="absolute top-0 right-0 p-2 opacity-10"><i data-lucide="shield-alert" class="w-16 h-16 text-rose-500"></i></div>
+                        <h5 class="font-bold text-rose-800 mb-2 flex items-center gap-2 relative z-10">
+                            <i data-lucide="shield-check" class="w-5 h-5"></i> 专家防治建议 <span class="text-[10px] bg-rose-200 text-rose-700 px-1.5 py-0.5 rounded ml-1 uppercase">✨ AI</span>
+                        </h5>
+                        <p id="preventionText" class="text-sm text-rose-800/80 leading-relaxed font-medium relative z-10">
+                            请选择上方生长阶段以查看对应的防治方法。
+                        </p>
+                    </div>
+                </div>
+
+                <!-- 右侧：历史知识科普翻转卡片 -->
+                <div class="flex flex-col">
+                    <h4 class="text-lg font-bold mb-6 flex items-center gap-2 text-slate-700">
+                        <i data-lucide="book-open" class="text-amber-500"></i> 历史病害科普 (点击翻转)
+                    </h4>
+                    
+                    <div class="perspective-1000 w-full h-64 md:h-80 cursor-pointer group" onclick="this.querySelector('.transform-style-3d').classList.toggle('rotate-y-180')">
+                        <div class="transform-style-3d relative w-full h-full duration-700">
+                            <!-- 卡片正面 -->
+                            <div class="absolute inset-0 backface-hidden bg-gradient-to-br from-amber-100 to-orange-50 rounded-3xl p-6 flex flex-col items-center justify-center text-center shadow-lg border border-amber-200/50">
+                                <div class="absolute top-4 left-4 bg-amber-200/50 text-amber-700 px-2 py-1 rounded-md text-xs font-bold flex items-center gap-1 shadow-sm">
+                                    ✨ 由 Gemini 生成
+                                </div>
+                                <div class="w-16 h-16 bg-amber-200 text-amber-600 rounded-full flex items-center justify-center mb-4 shadow-inner">
+                                    <i data-lucide="help-circle" class="w-8 h-8"></i>
+                                </div>
+                                <h5 class="text-xl font-bold text-amber-800 mb-2">你知道吗？</h5>
+                                <p class="text-amber-700/80 font-bold">点击查看该作物的著名历史病害事件</p>
+                                <div class="absolute bottom-4 right-4 animate-bounce text-amber-500">
+                                    <i data-lucide="mouse-pointer-click"></i>
+                                </div>
+                            </div>
+                            
+                            <!-- 卡片背面 -->
+                            <div class="absolute inset-0 backface-hidden rotate-y-180 bg-slate-800 text-white rounded-3xl p-6 flex flex-col shadow-xl overflow-hidden border border-slate-700">
+                                <div class="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-10 -mt-10"></div>
+                                <h5 id="historyTitle" class="text-xl font-bold text-amber-400 mb-4 pb-2 border-b border-white/20 relative z-10 flex items-start gap-2">
+                                    历史事件标题
+                                </h5>
+                                <p id="historyContent" class="text-sm leading-relaxed text-slate-300 relative z-10 overflow-y-auto no-scrollbar font-medium">
+                                    事件内容详情...
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI 助手切换按钮 (左下角) -->
+    <button onclick="toggleChat()" class="fixed bottom-6 left-6 z-20 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full p-4 shadow-xl flex items-center justify-center transition-transform hover:scale-105 pointer-events-auto">
+        <i data-lucide="bot" class="w-6 h-6"></i>
+    </button>
+
+    <!-- 模式切换面板 (底部中央) -->
+    <div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 glass rounded-full p-1.5 flex gap-1 shadow-xl pointer-events-auto">
+        <button onclick="setGlobeMode('abstract')" id="btn-mode-abstract" class="px-4 py-2 rounded-full text-sm font-bold transition-all bg-emerald-500 text-white shadow-sm flex items-center gap-2">
+            <i data-lucide="globe-2" class="w-4 h-4"></i> 抽象分布
+        </button>
+        <button onclick="setGlobeMode('satellite')" id="btn-mode-satellite" class="px-4 py-2 rounded-full text-sm font-bold transition-all text-slate-600 bg-white/50 hover:bg-white/80 flex items-center gap-2">
+            <i data-lucide="map" class="w-4 h-4"></i> 真实地形
+        </button>
+        <button onclick="setGlobeMode('weather')" id="btn-mode-weather" class="px-4 py-2 rounded-full text-sm font-bold transition-all text-slate-600 bg-white/50 hover:bg-white/80 flex items-center gap-2">
+            <i data-lucide="cloud-rain" class="w-4 h-4"></i> 实时气象
+        </button>
+    </div>
+
+    <!-- AI 问答面板 -->
+    <div id="aiChatPanel" class="glass shadow-2xl flex flex-col fixed bottom-24 left-6 w-[350px] h-[500px] z-20 rounded-2xl overflow-hidden transition-all duration-300 opacity-0 pointer-events-none translate-y-4 max-w-[calc(100vw-3rem)]">
+        <div class="p-4 border-b border-slate-200/50 bg-gradient-to-r from-indigo-50 to-purple-50 flex justify-between items-center">
+            <h3 class="font-bold text-indigo-800 flex items-center gap-2">
+                <i data-lucide="bot" class="w-5 h-5"></i> 农学 AI 助手
+            </h3>
+            <button onclick="toggleChat()" class="p-1 hover:bg-indigo-100 rounded-md text-indigo-500 transition">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div id="chatHistory" class="flex-1 overflow-y-auto p-4 space-y-4 bg-white/60 text-sm">
+            <div class="flex items-start gap-2">
+                <div class="bg-indigo-100 p-3 rounded-2xl rounded-tl-none text-indigo-900 shadow-sm leading-relaxed">
+                    你好！我是专属的农学 AI 助手。你可以问我关于任何作物的生长周期、气候影响或病虫害防治的问题。
+                </div>
+            </div>
+        </div>
+        <div class="p-3 bg-white border-t border-slate-100 flex gap-2 items-center pointer-events-auto">
+            <input type="text" id="chatInput" class="flex-1 border border-slate-300 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-slate-50" placeholder="向 AI 提问..." onkeydown="if(event.key === 'Enter') sendChatMessage()">
+            <button onclick="sendChatMessage()" class="bg-indigo-600 hover:bg-indigo-700 text-white p-2.5 rounded-xl transition-colors shadow-sm">
+                <i data-lucide="send" class="w-4 h-4"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- 用户专属 CSV 数据区 (压缩排版以节约空间) -->
+    <script type="text/csv" id="builtinCsvData">
+Country ISO2 code,abaca,agave,alfalfa,almond,aniseetc,apple,apricot,areca,artichoke,asparagus,avocado,bambara,banana,barley,bean,beetfor,berrynes,blueberry,brazil,broadbean,buckwheat,cabbage,cabbagefor,canaryseed,carob,carrot,carrotfor,cashew,cashewapple,cassava,castor,cauliflower,cerealnes,cherry,chestnut,chickpea,chicory,chilleetc,cinnamon,citrusnes,clove,clover,cocoa,coconut,coffee,cotton,cowpea,cranberry,cucumberetc,currant,date,eggplant,fibrenes,fig,flax,fonio,fornes,fruitnes,garlic,ginger,gooseberry,grape,grapefruitetc,grassnes,greenbean,greenbroadbean,greencorn,greenonion,greenpea,groundnut,hazelnut,hemp,hempseed,hop,jute,jutelikefiber,kapokfiber,kapokseed,karite,kiwi,kolanut,legumenes,lemonlime,lentil,lettuce,linseed,lupin,maize,maizefor,mango,mate,melonetc,melonseed,millet,mixedgrain,mixedgrass,mushroom,mustard,nutmeg,nutnes,oats,oilpalm,oilseedfor,oilseednes,okra,olive,onion,orange,papaya,pea,peachetc,pear,pepper,peppermint,persimmon,pigeonpea,pimento,pineapple,pistachio,plantain,plum,popcorn,poppy,potato,pulsenes,pumpkinetc,pyrethrum,quince,quinoa,ramie,rapeseed,rasberry,rice,rootnes,rubber,rye,ryefor,safflower,sesame,sisal,sorghum,sorghumfor,sourcherry,soybean,spicenes,spinach,stonefruitnes,strawberry,stringbean,sugarbeet,sugarcane,sugarnes,sunflower,swedefor,sweetpotato,tangetc,taro,tea,tobacco,tomato,triticale,tropicalnes,tung,turnipfor,vanilla,vegetablenes,vegfor,vetch,walnut,watermelon,wheat,yam,yautia
+AF,0 ,0 ,49 ,5930 ,1171 ,8699 ,5673 ,0 ,0 ,0 ,0 ,0 ,6 ,90701 ,39 ,1 ,827 ,0 ,0 ,2 ,0 ,19 ,0 ,0 ,0 ,16 ,0 ,0 ,0 ,0 ,1 ,2 ,2 ,4 ,0 ,3 ,0 ,0 ,0 ,37 ,0 ,0 ,0 ,0 ,0 ,55179 ,0 ,0 ,19 ,0 ,28 ,2 ,0 ,360 ,0 ,0 ,136 ,3040 ,3 ,0 ,0 ,28279 ,0 ,81 ,1 ,0 ,0 ,0 ,2 ,17 ,3 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,23 ,0 ,8396 ,0 ,115026 ,159 ,14 ,0 ,14359 ,0 ,1578 ,0 ,344 ,0 ,0 ,0 ,538 ,2 ,0 ,0 ,0 ,2 ,2134 ,7564 ,283 ,0 ,2776 ,2339 ,456 ,0 ,0 ,0 ,0 ,11 ,0 ,272 ,0 ,1149 ,0 ,0 ,50058 ,57087 ,7 ,0 ,0 ,0 ,0 ,114 ,0 ,147412 ,4 ,0 ,2 ,0 ,9 ,21927 ,0 ,3 ,0 ,1 ,0 ,1026 ,1 ,454 ,0 ,0 ,375 ,1564 ,0 ,241 ,0 ,1 ,11 ,0 ,3 ,0 ,85 ,0 ,9 ,0 ,0 ,0 ,45 ,155794 ,0 ,728 ,21568 ,2292561 ,2 ,0 
+AL,0 ,0 ,1078 ,18 ,0 ,4218 ,347 ,0 ,1 ,3 ,0 ,0 ,0 ,3626 ,13343 ,3 ,0 ,0 ,0 ,162 ,0 ,1309 ,0 ,0 ,5 ,302 ,0 ,0 ,0 ,0 ,0 ,206 ,0 ,2135 ,2036 ,0 ,0 ,2401 ,0 ,1 ,0 ,30 ,0 ,0 ,0 ,732 ,2 ,0 ,1517 ,0 ,0 ,665 ,0 ,1646 ,0 ,0 ,0 ,85 ,880 ,0 ,0 ,9111 ,0 ,66 ,919 ,21 ,1064 ,1176 ,361 ,0 ,1 ,0 ,0 ,2069 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,72 ,414 ,0 ,878 ,0 ,0 ,56396 ,10078 ,0 ,0 ,985 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,1060 ,13244 ,0 ,0 ,0 ,0 ,43691 ,3482 ,246 ,0 ,5 ,1133 ,756 ,0 ,0 ,0 ,0 ,1 ,0 ,2 ,0 ,2593 ,0 ,1 ,9640 ,1125 ,433 ,0 ,810 ,0 ,0 ,0 ,3 ,0 ,0 ,0 ,1278 ,0 ,0 ,0 ,0 ,0 ,0 ,3130 ,177 ,403 ,885 ,0 ,96 ,0 ,857 ,0 ,0 ,550 ,0 ,0 ,596 ,0 ,3 ,775 ,6703 ,0 ,0 ,0 ,0 ,0 ,11225 ,1839 ,6379 ,13 ,3728 ,54853 ,0 ,0 
+DZ,0 ,0 ,3927 ,33988 ,36 ,31962 ,29110 ,0 ,5675 ,0 ,0 ,0 ,10 ,978513 ,1932 ,180 ,0 ,0 ,0 ,39476 ,0 ,3957 ,0 ,0 ,749 ,16616 ,0 ,0 ,0 ,0 ,0 ,8447 ,88 ,3468 ,0 ,35864 ,0 ,21715 ,0 ,382 ,0 ,2725 ,0 ,0 ,0 ,294 ,0 ,0 ,4355 ,0 ,113752 ,5963 ,0 ,37053 ,0 ,0 ,83938 ,12484 ,11466 ,0 ,0 ,66326 ,74 ,0 ,12260 ,20354 ,0 ,30 ,37835 ,4447 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3917 ,13915 ,2 ,5 ,6 ,481 ,3484 ,0 ,0 ,14 ,0 ,0 ,0 ,168 ,0 ,0 ,0 ,0 ,60464 ,0 ,0 ,0 ,0 ,395827 ,47844 ,44612 ,0 ,9399 ,16434 ,19578 ,0 ,1 ,0 ,0 ,3592 ,0 ,14 ,0 ,12388 ,0 ,0 ,141115 ,115 ,14967 ,0 ,1569 ,0 ,0 ,11660 ,0 ,170 ,0 ,0 ,1 ,55205 ,0 ,1 ,1 ,68 ,0 ,0 ,0 ,6 ,2 ,2196 ,1 ,2 ,0 ,4 ,0 ,186 ,0 ,0 ,14059 ,0 ,0 ,5218 ,25977 ,229 ,23 ,0 ,0 ,0 ,26950 ,58465 ,159 ,2 ,57545 ,1839368 ,0 ,0 
+AD,0 ,0 ,2 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,1 ,0 ,1 ,0 ,0 ,11 ,0 ,0 
+AO,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,26 ,129262 ,0 ,753821 ,0 ,0 ,0 ,0 ,0 ,0 ,63465 ,0 ,0 ,0 ,0 ,0 ,2631 ,0 ,915888 ,15908 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,36217 ,0 ,0 ,2738 ,0 ,47826 ,2883 ,375 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8108 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,12701 ,0 ,295371 ,0 ,0 ,0 ,0 ,0 ,746 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1822267 ,0 ,12 ,0 ,0 ,73 ,249610 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,23175 ,0 ,0 ,0 ,0 ,9 ,11 ,12 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,39884 ,0 ,601 ,0 ,0 ,0 ,70766 ,18 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,7980 ,23 ,27 ,0 ,0 ,0 ,11542 ,520 ,283462 ,0 ,0 ,39040 ,0 ,0 ,0 ,0 ,0 ,0 ,19289 ,0 ,16999 ,0 ,151919 ,0 ,13 ,3 ,2768 ,5968 ,0 ,1 ,0 ,0 ,0 ,25128 ,60782 ,0 ,0 ,0 ,3283 ,31 ,0 
+AG,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,196 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,23 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,110 ,0 ,0 ,0 ,0 ,44 ,0 
+AR,0 ,0 ,424466 ,359 ,7355 ,22063 ,2342 ,0 ,4076 ,2525 ,573 ,0 ,8391 ,1059389 ,475659 ,0 ,0 ,0 ,0 ,1851 ,6 ,0 ,0 ,13122 ,0 ,9097 ,0 ,0 ,77 ,19313 ,4 ,0 ,26592 ,2143 ,2 ,105299 ,0 ,6530 ,0 ,0 ,0 ,115106 ,0 ,0 ,12 ,414335 ,0 ,0 ,0 ,0 ,0 ,0 ,1505 ,259 ,2766 ,0 ,181 ,1 ,14787 ,0 ,0 ,198043 ,4214 ,658150 ,1283 ,2 ,5 ,1 ,14115 ,342159 ,0 ,1 ,0 ,360 ,0 ,2 ,0 ,0 ,0 ,1 ,0 ,0 ,51728 ,25965 ,1 ,9255 ,84 ,7797433 ,344825 ,271 ,159918 ,5122 ,0 ,3531 ,0 ,41 ,0 ,0 ,0 ,0 ,289437 ,6 ,0 ,0 ,0 ,126010 ,24947 ,43454 ,188 ,66981 ,13636 ,24611 ,0 ,0 ,0 ,0 ,2795 ,175 ,0 ,8 ,18365 ,0 ,0 ,74526 ,0 ,18072 ,0 ,3305 ,3 ,0 ,16895 ,0 ,185823 ,2 ,0 ,104846 ,0 ,22837 ,8 ,0 ,364585 ,381565 ,0 ,16404753 ,1310 ,0 ,0 ,1091 ,6354 ,7 ,448227 ,0 ,1420506 ,0 ,22588 ,29203 ,0 ,33085 ,52945 ,16581 ,0 ,1 ,2680 ,0 ,0 ,38831 ,64455 ,0 ,15004 ,9087 ,6480827 ,1 ,0 
+AM,0 ,0 ,45 ,79 ,5 ,9849 ,9828 ,0 ,0 ,0 ,0 ,0 ,0 ,45396 ,1245 ,219 ,1522 ,0 ,0 ,10 ,0 ,2670 ,0 ,0 ,0 ,804 ,0 ,0 ,0 ,0 ,0 ,416 ,4433 ,1624 ,6 ,20 ,0 ,1972 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,1569 ,0 ,7 ,1678 ,0 ,200 ,0 ,0 ,12744 ,499 ,949 ,0 ,0 ,10825 ,0 ,46 ,1241 ,1 ,0 ,3 ,173 ,4 ,201 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,28 ,4 ,129 ,2 ,120 ,0 ,1275 ,322 ,0 ,0 ,3728 ,0 ,1 ,1 ,405 ,0 ,0 ,0 ,8 ,3202 ,0 ,0 ,8 ,1 ,77 ,1427 ,50 ,0 ,106 ,4547 ,2537 ,0 ,0 ,0 ,0 ,1 ,0 ,5 ,0 ,2432 ,0 ,7 ,20835 ,338 ,4 ,0 ,319 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,146 ,0 ,0 ,8 ,0 ,0 ,0 ,745 ,1 ,16 ,3 ,526 ,3 ,1 ,3540 ,1 ,0 ,38 ,0 ,0 ,9 ,0 ,87 ,282 ,4697 ,0 ,575 ,0 ,0 ,0 ,3784 ,7908 ,93 ,1468 ,3937 ,59476 ,0 ,0 
+AU,0 ,0 ,157269 ,34253 ,0 ,19779 ,6263 ,0 ,0 ,1614 ,14975 ,0 ,12011 ,4914094 ,105905 ,0 ,1817 ,0 ,0 ,207312 ,0 ,2365 ,0 ,7361 ,0 ,4882 ,0 ,0 ,0 ,0 ,0 ,8517 ,0 ,2035 ,0 ,250666 ,0 ,2034 ,0 ,75 ,0 ,0 ,0 ,0 ,0 ,67903 ,6684 ,0 ,838 ,98 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,141769 ,731 ,428940 ,6593 ,0 ,6403 ,0 ,3992 ,4810 ,0 ,0 ,0 ,266 ,0 ,0 ,0 ,0 ,0 ,170 ,0 ,0 ,1435 ,378317 ,5637 ,7059 ,445965 ,39309 ,0 ,14957 ,0 ,6045 ,0 ,35993 ,0 ,0 ,129 ,202 ,0 ,21547 ,736601 ,0 ,0 ,0 ,0 ,20638 ,5194 ,20078 ,289 ,247983 ,11339 ,4923 ,0 ,0 ,0 ,0 ,0 ,2202 ,0 ,0 ,3050 ,0 ,0 ,27510 ,0 ,4637 ,0 ,0 ,0 ,0 ,2014207 ,225 ,5916 ,0 ,0 ,40746 ,0 ,7145 ,0 ,0 ,175089 ,0 ,0 ,10716 ,0 ,1350 ,0 ,2318 ,0 ,0 ,249415 ,0 ,9177 ,0 ,1843 ,5152 ,0 ,0 ,728 ,4153 ,81843 ,1125 ,0 ,0 ,0 ,2031 ,4058 ,37245 ,0 ,3947 ,7897797 ,0 ,0 
+AT,0 ,0 ,6592 ,2 ,0 ,6582 ,860 ,0 ,1 ,708 ,0 ,0 ,0 ,127147 ,1 ,915 ,914 ,139 ,0 ,5462 ,4 ,1305 ,0 ,2 ,0 ,1833 ,2 ,0 ,0 ,0 ,0 ,261 ,5018 ,308 ,1 ,1 ,0 ,159 ,0 ,0 ,0 ,26900 ,0 ,0 ,0 ,0 ,0 ,0 ,375 ,339 ,0 ,9 ,0 ,1 ,2 ,0 ,24322 ,14 ,189 ,0 ,273 ,44460 ,0 ,15629 ,1034 ,0 ,22216 ,1 ,2099 ,0 ,2 ,1128 ,0 ,266 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,29 ,1 ,2 ,1431 ,1180 ,240 ,212245 ,27809 ,0 ,0 ,1 ,0 ,3007 ,4201 ,289 ,0 ,23 ,0 ,0 ,16597 ,0 ,21216 ,39241 ,0 ,4 ,3339 ,3 ,0 ,5520 ,193 ,578 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,238 ,0 ,1004 ,24095 ,4095 ,622 ,0 ,0 ,0 ,0 ,32101 ,79 ,2 ,0 ,0 ,39330 ,0 ,0 ,0 ,0 ,4302 ,0 ,22 ,68098 ,0 ,621 ,0 ,1184 ,0 ,26915 ,0 ,0 ,23476 ,0 ,0 ,1 ,0 ,0 ,31 ,196 ,43855 ,0 ,0 ,13 ,0 ,2635 ,891 ,2 ,206 ,35 ,278920 ,0 ,0 
+AZ,0 ,0 ,289 ,1216 ,17 ,22682 ,3497 ,0 ,0 ,0 ,0 ,0 ,0 ,174897 ,3243 ,0 ,1917 ,0 ,0 ,292 ,0 ,4323 ,0 ,0 ,0 ,1185 ,0 ,0 ,0 ,0 ,0 ,26 ,275 ,2736 ,277 ,70 ,0 ,2846 ,0 ,656 ,0 ,0 ,0 ,0 ,0 ,69817 ,0 ,721 ,10696 ,349 ,114 ,4293 ,0 ,1923 ,0 ,0 ,48646 ,17616 ,2586 ,0 ,2 ,14487 ,1 ,47 ,1 ,0 ,0 ,0 ,396 ,1 ,29561 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,170 ,0 ,0 ,500 ,757 ,2 ,1 ,0 ,32308 ,1583 ,1 ,0 ,7523 ,0 ,1055 ,0 ,52179 ,0 ,1 ,0 ,3607 ,5700 ,0 ,0 ,6753 ,0 ,1251 ,11617 ,340 ,0 ,5720 ,5365 ,5478 ,0 ,0 ,11553 ,0 ,1 ,0 ,19 ,0 ,5606 ,0 ,0 ,59268 ,2252 ,1299 ,0 ,4007 ,0 ,0 ,58 ,1424 ,2551 ,0 ,0 ,252 ,0 ,1 ,24 ,0 ,131 ,0 ,3986 ,48 ,11 ,0 ,66 ,8 ,0 ,5186 ,21 ,0 ,10573 ,0 ,0 ,1893 ,0 ,608 ,2443 ,18683 ,0 ,19 ,0 ,0 ,0 ,5551 ,11110 ,236 ,4291 ,13195 ,278630 ,0 ,0 
+BS,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,411 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,34 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,314 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,81 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,125 ,0 ,0 ,0 ,22 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2356 ,0 ,0 ,0 ,474 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2610 ,0 ,0 ,0 ,0 ,0 ,0 
+BH,0 ,0 ,10 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,60 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,10 ,4 ,0 ,0 ,0 ,0 ,0 ,10 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10 ,0 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,1 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10 ,0 ,0 ,0 ,0 ,0 ,10 ,31 ,0 ,0 ,1 ,0 ,0 ,0 
+BD,0 ,0 ,0 ,0 ,27 ,0 ,0 ,325113 ,0 ,0 ,0 ,0 ,46512 ,169 ,54911 ,0 ,1589 ,0 ,0 ,0 ,0 ,19347 ,0 ,0 ,0 ,6 ,0 ,7 ,0 ,3 ,353 ,22277 ,9 ,0 ,0 ,4606 ,0 ,1 ,0 ,1 ,0 ,0 ,0 ,39794 ,4 ,19640 ,127 ,0 ,13095 ,0 ,0 ,122 ,1852 ,0 ,0 ,0 ,3425 ,69328 ,59569 ,9263 ,0 ,2 ,10963 ,64 ,27021 ,0 ,0 ,0 ,73 ,31120 ,0 ,0 ,0 ,0 ,558342 ,651 ,0 ,0 ,0 ,0 ,0 ,0 ,48395 ,118485 ,6914 ,6571 ,0 ,312895 ,0 ,105389 ,0 ,14281 ,0 ,12251 ,0 ,0 ,0 ,10 ,9 ,0 ,0 ,0 ,0 ,2139 ,59 ,0 ,150365 ,876 ,29373 ,9126 ,2 ,2 ,0 ,0 ,0 ,465 ,87259 ,13928 ,0 ,9653 ,1 ,0 ,0 ,411614 ,179955 ,52841 ,0 ,0 ,0 ,0 ,264936 ,0 ,5076336 ,0 ,176499 ,0 ,0 ,0 ,35042 ,0 ,68 ,0 ,0 ,59231 ,46841 ,5391 ,0 ,0 ,0 ,0 ,80948 ,8428 ,41 ,0 ,24004 ,3074 ,0 ,53675 ,37140 ,24903 ,0 ,90975 ,0 ,0 ,0 ,86496 ,234728 ,0 ,3 ,5 ,229014 ,11 ,0 
+BB,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,139 ,0 ,28 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,457 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,25 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3594 ,0 ,0 ,0 ,47 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,31 ,0 
+BY,0 ,0 ,0 ,0 ,1 ,50107 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,388829 ,83715 ,2 ,0 ,1 ,0 ,1 ,26709 ,9788 ,0 ,0 ,0 ,8696 ,0 ,0 ,0 ,0 ,0 ,2 ,7823 ,561 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,130 ,5718 ,8 ,0 ,0 ,0 ,0 ,48759 ,0 ,17874 ,5 ,1150 ,0 ,1 ,5216 ,0 ,18 ,0 ,0 ,0 ,0 ,1016 ,0 ,1666 ,1 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,95 ,0 ,0 ,0 ,20323 ,1603 ,207013 ,154501 ,0 ,0 ,0 ,0 ,9856 ,172 ,160149 ,0 ,14 ,0 ,873 ,154063 ,0 ,0 ,3 ,0 ,0 ,10729 ,0 ,0 ,33819 ,1 ,5507 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7488 ,0 ,0 ,258529 ,12 ,2 ,0 ,962 ,0 ,0 ,352058 ,3 ,0 ,0 ,0 ,343525 ,0 ,0 ,0 ,0 ,4 ,0 ,6121 ,49 ,0 ,0 ,0 ,8756 ,0 ,83831 ,0 ,0 ,1869 ,0 ,0 ,0 ,0 ,0 ,5 ,6896 ,432412 ,0 ,0 ,0 ,0 ,18334 ,15510 ,9692 ,5215 ,8 ,661688 ,0 ,0 
+BE,0 ,0 ,99 ,0 ,1 ,5411 ,3 ,0 ,3 ,541 ,0 ,0 ,0 ,44003 ,153 ,2914 ,105 ,97 ,0 ,1230 ,4 ,4267 ,7 ,0 ,0 ,4763 ,0 ,0 ,0 ,0 ,0 ,5748 ,0 ,859 ,1 ,0 ,7961 ,104 ,0 ,0 ,0 ,13 ,0 ,0 ,0 ,0 ,0 ,0 ,61 ,77 ,0 ,23 ,0 ,0 ,17232 ,0 ,75 ,0 ,2 ,0 ,0 ,396 ,0 ,98 ,8653 ,5 ,11392 ,3 ,11550 ,0 ,8 ,69 ,1 ,196 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,7 ,0 ,1 ,10795 ,109 ,2 ,47958 ,22783 ,0 ,0 ,4 ,0 ,0 ,323 ,956 ,8 ,0 ,0 ,0 ,3261 ,0 ,34 ,0 ,0 ,0 ,4112 ,0 ,0 ,657 ,5 ,9934 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,40 ,0 ,6 ,93584 ,2391 ,880 ,0 ,79 ,0 ,0 ,7930 ,121 ,1 ,0 ,0 ,716 ,136 ,0 ,0 ,0 ,1 ,2 ,144 ,97 ,0 ,4176 ,0 ,1521 ,7 ,56655 ,0 ,0 ,4923 ,0 ,0 ,0 ,0 ,0 ,31 ,606 ,3765 ,0 ,0 ,0 ,0 ,6192 ,22366 ,0 ,101 ,0 ,196071 ,0 ,0 
+BZ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,1 ,0 ,2551 ,0 ,5597 ,0 ,0 ,0 ,0 ,6 ,0 ,47 ,0 ,0 ,0 ,38 ,0 ,335 ,0 ,63 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,30 ,0 ,0 ,0 ,0 ,370 ,977 ,68 ,0 ,0 ,0 ,38 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1109 ,0 ,0 ,0 ,1 ,2066 ,3 ,25 ,0 ,0 ,61 ,278 ,95 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,22382 ,0 ,3 ,0 ,55 ,0 ,0 ,0 ,0 ,0 ,0 ,13 ,2 ,0 ,43 ,0 ,0 ,5 ,0 ,1 ,10980 ,186 ,554 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,326 ,0 ,335 ,0 ,0 ,0 ,81 ,1 ,13 ,0 ,0 ,0 ,0 ,0 ,0 ,3168 ,16 ,11 ,0 ,0 ,0 ,14 ,0 ,5344 ,0 ,0 ,8274 ,0 ,0 ,0 ,0 ,0 ,0 ,37205 ,0 ,0 ,0 ,22 ,0 ,0 ,0 ,0 ,72 ,0 ,0 ,0 ,0 ,0 ,439 ,691 ,0 ,0 ,128 ,0 ,14 ,15 
+BJ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,2694 ,0 ,97440 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,4 ,0 ,454875 ,0 ,228168 ,902 ,0 ,43 ,0 ,0 ,18 ,0 ,29346 ,0 ,64 ,0 ,0 ,1070 ,16319 ,298 ,612261 ,993 ,0 ,0 ,0 ,542 ,0 ,0 ,0 ,0 ,7006 ,0 ,35067 ,0 ,22 ,0 ,0 ,0 ,0 ,1 ,0 ,20 ,2 ,0 ,115263 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7909 ,0 ,2025 ,0 ,0 ,0 ,1 ,0 ,0 ,836061 ,0 ,3213 ,0 ,0 ,41 ,23477 ,0 ,0 ,0 ,0 ,0 ,5142 ,0 ,34350 ,0 ,150 ,14697 ,0 ,5450 ,5978 ,8 ,0 ,0 ,0 ,601 ,0 ,0 ,0 ,11713 ,6523 ,0 ,3 ,0 ,0 ,0 ,6 ,37683 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,70105 ,3 ,43 ,0 ,0 ,0 ,11532 ,0 ,89803 ,0 ,0 ,134038 ,3 ,0 ,0 ,0 ,0 ,0 ,813 ,0 ,0 ,0 ,6667 ,0 ,604 ,0 ,31 ,35917 ,0 ,0 ,0 ,0 ,0 ,12259 ,16449 ,0 ,0 ,0 ,1 ,152845 ,0 
+BT,0 ,0 ,0 ,0 ,6 ,1226 ,0 ,97 ,0 ,0 ,0 ,0 ,25 ,700 ,1269 ,0 ,0 ,0 ,0 ,1 ,2517 ,26 ,0 ,0 ,0 ,10 ,0 ,1 ,0 ,1 ,0 ,11 ,1180 ,0 ,0 ,7 ,0 ,1422 ,0 ,4 ,0 ,0 ,0 ,21 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,37 ,0 ,0 ,0 ,0 ,119 ,286 ,22 ,480 ,0 ,0 ,0 ,0 ,34 ,0 ,0 ,0 ,12 ,4 ,0 ,0 ,0 ,0 ,69 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,301 ,5 ,12 ,0 ,19222 ,0 ,16 ,0 ,1 ,0 ,1075 ,0 ,0 ,0 ,1953 ,4996 ,0 ,0 ,0 ,0 ,8 ,8 ,0 ,0 ,3913 ,3 ,60 ,3 ,3 ,0 ,0 ,0 ,4 ,1314 ,32 ,0 ,0 ,1 ,0 ,0 ,4721 ,1625 ,58 ,0 ,0 ,0 ,0 ,1700 ,0 ,4737 ,2227 ,0 ,0 ,0 ,0 ,8 ,0 ,17 ,0 ,0 ,282 ,457 ,0 ,0 ,0 ,0 ,0 ,153 ,0 ,1 ,0 ,68 ,0 ,0 ,113 ,130 ,2 ,0 ,1 ,0 ,0 ,0 ,495 ,2272 ,0 ,2 ,1 ,1953 ,680 ,0 
+BO,0 ,0 ,17846 ,0 ,0 ,745 ,0 ,0 ,0 ,2 ,2144 ,0 ,19811 ,54184 ,65505 ,0 ,0 ,0 ,0 ,13659 ,1 ,638 ,0 ,0 ,0 ,5229 ,0 ,0 ,20 ,26138 ,1 ,131 ,1220 ,380 ,53505 ,238 ,0 ,3985 ,0 ,0 ,0 ,2 ,10166 ,0 ,25604 ,139412 ,0 ,0 ,546 ,0 ,0 ,0 ,0 ,132 ,0 ,0 ,33 ,555 ,578 ,0 ,0 ,3388 ,470 ,65677 ,317 ,24013 ,6795 ,0 ,16572 ,18704 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4395 ,1 ,2722 ,174 ,1 ,419442 ,9 ,2003 ,3 ,1 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,13906 ,14 ,0 ,0 ,0 ,1 ,7295 ,22069 ,2300 ,3684 ,8348 ,378 ,39 ,0 ,0 ,0 ,0 ,4949 ,0 ,40486 ,425 ,0 ,0 ,181380 ,0 ,3435 ,0 ,26 ,107030 ,0 ,3 ,0 ,176957 ,17565 ,8 ,349 ,0 ,16 ,10107 ,0 ,405568 ,7 ,0 ,1176740 ,3014 ,0 ,0 ,516 ,1 ,0 ,177775 ,0 ,129542 ,0 ,1084 ,24119 ,0 ,186 ,1023 ,4819 ,0 ,2 ,1 ,0 ,0 ,3969 ,248 ,0 ,0 ,4184 ,202329 ,1 ,1 
+BA,0 ,0 ,12999 ,177 ,0 ,11182 ,17 ,0 ,0 ,0 ,0 ,0 ,0 ,16267 ,7697 ,2215 ,4 ,0 ,0 ,0 ,2 ,6078 ,0 ,0 ,2 ,1668 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3748 ,5 ,1490 ,1 ,3671 ,0 ,0 ,0 ,14916 ,0 ,0 ,0 ,0 ,330 ,0 ,1149 ,0 ,0 ,0 ,0 ,31 ,0 ,0 ,0 ,145 ,1859 ,0 ,0 ,3382 ,0 ,0 ,450 ,0 ,127 ,0 ,20 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,44 ,0 ,0 ,177773 ,3032 ,0 ,0 ,0 ,0 ,1 ,1 ,0 ,0 ,0 ,0 ,0 ,14138 ,0 ,0 ,0 ,0 ,211 ,5116 ,18 ,0 ,1385 ,850 ,3693 ,0 ,0 ,0 ,0 ,3948 ,0 ,0 ,0 ,24282 ,0 ,1 ,35303 ,0 ,0 ,0 ,9 ,0 ,0 ,1270 ,827 ,0 ,0 ,0 ,3554 ,0 ,0 ,0 ,0 ,3 ,0 ,1153 ,7391 ,0 ,0 ,0 ,1229 ,0 ,124 ,0 ,0 ,523 ,0 ,0 ,10 ,0 ,0 ,1225 ,4190 ,0 ,0 ,0 ,0 ,0 ,19908 ,31408 ,346 ,2538 ,1758 ,27433 ,0 ,0 
+BW,0 ,0 ,17 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,4 ,0 ,1 ,1 ,10 ,0 ,0 ,0 ,0 ,0 ,0 ,55 ,0 ,0 ,0 ,28 ,0 ,0 ,0 ,0 ,2 ,0 ,3103 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,522 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1999 ,0 ,0 ,0 ,8 ,3 ,0 ,1 ,0 ,8 ,0 ,1 ,967 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,4 ,87998 ,0 ,2 ,0 ,584 ,0 ,9935 ,0 ,244 ,0 ,0 ,0 ,1 ,7 ,0 ,0 ,6 ,0 ,0 ,116 ,234 ,0 ,0 ,3 ,0 ,1 ,0 ,0 ,0 ,5 ,2 ,0 ,0 ,1 ,0 ,0 ,230 ,35932 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8715 ,0 ,6 ,0 ,0 ,0 ,0 ,48714 ,0 ,0 ,42 ,0 ,0 ,0 ,0 ,0 ,0 ,33 ,0 ,1030 ,0 ,114 ,1 ,0 ,3 ,1 ,100 ,0 ,0 ,0 ,0 ,0 ,3077 ,3752 ,0 ,0 ,387 ,302 ,5063 ,0 
+BR,0 ,0 ,94 ,0 ,3 ,31797 ,2 ,0 ,4 ,1 ,16013 ,0 ,456064 ,103365 ,2448275 ,0 ,0 ,0 ,0 ,36493 ,46360 ,5 ,0 ,5 ,0 ,19 ,0 ,402786 ,430861 ,1192007 ,46148 ,1 ,23 ,0 ,103 ,1 ,0 ,20 ,0 ,0 ,0 ,114 ,589361 ,190111 ,1907258 ,1598672 ,0 ,0 ,1 ,0 ,0 ,0 ,1 ,2132 ,2 ,0 ,883 ,9 ,12260 ,0 ,0 ,71851 ,4404 ,2430 ,1 ,1 ,85 ,2 ,66 ,172685 ,0 ,0 ,0 ,0 ,908 ,3119 ,0 ,0 ,0 ,0 ,0 ,0 ,57454 ,4 ,6 ,4262 ,1 ,16698016 ,226 ,91884 ,67433 ,23069 ,0 ,25 ,0 ,0 ,0 ,0 ,0 ,3889 ,453859 ,202182 ,0 ,0 ,0 ,1601 ,47563 ,553203 ,28510 ,979 ,15663 ,1099 ,35911 ,0 ,7829 ,0 ,3 ,63901 ,0 ,459 ,3 ,0 ,0 ,118101 ,0 ,76 ,0 ,72 ,145 ,695 ,35143 ,0 ,1604416 ,110 ,156680 ,5389 ,0 ,0 ,148968 ,96181 ,833180 ,118 ,0 ,37311244 ,1 ,0 ,0 ,4563 ,5 ,0 ,10002301 ,0 ,49887 ,0 ,57351 ,55161 ,0 ,232 ,345203 ,52213 ,0 ,45983 ,68 ,0 ,0 ,185803 ,236098 ,0 ,3582 ,96699 ,2422451 ,25334 ,0 
+BN,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,499 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,174 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,216 ,0 ,0 ,0 ,0 ,59 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,857 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,742 ,0 ,10 ,0 ,0 ,0 ,54 ,0 ,0 ,0 ,0 ,68 ,0 ,0 ,0 ,0 ,122 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14 ,0 ,0 ,0 ,0 ,0 ,0 ,807 ,431 ,3375 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,36 ,0 ,0 ,0 ,1 ,5 ,0 ,3 ,0 ,0 ,0 ,887 ,0 ,0 ,0 ,12 ,0 ,239 ,0 
+BG,0 ,0 ,12179 ,986 ,22901 ,3938 ,2042 ,0 ,177 ,2087 ,0 ,0 ,0 ,124063 ,1392 ,1861 ,875 ,29 ,0 ,2 ,0 ,1676 ,0 ,0 ,4 ,630 ,0 ,0 ,0 ,0 ,0 ,213 ,6108 ,10396 ,6 ,1355 ,0 ,3220 ,0 ,0 ,0 ,353 ,0 ,0 ,0 ,581 ,6 ,0 ,1267 ,88 ,0 ,414 ,0 ,27 ,23 ,0 ,6 ,11221 ,468 ,0 ,0 ,26159 ,0 ,59134 ,286 ,536 ,10377 ,1035 ,912 ,6952 ,953 ,609 ,3 ,331 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,1239 ,5 ,2118 ,162 ,113 ,0 ,599077 ,52215 ,0 ,0 ,1706 ,1 ,3836 ,1 ,483 ,0 ,2881 ,0 ,669 ,7665 ,0 ,0 ,5971 ,0 ,216 ,2941 ,17 ,0 ,13609 ,2023 ,507 ,0 ,0 ,0 ,0 ,180 ,0 ,5 ,0 ,8956 ,0 ,12 ,10276 ,10491 ,1832 ,0 ,325 ,0 ,0 ,120183 ,1745 ,12119 ,0 ,0 ,3855 ,0 ,0 ,4 ,0 ,3160 ,0 ,1208 ,3721 ,693 ,166 ,1 ,806 ,0 ,1728 ,0 ,0 ,822708 ,0 ,0 ,4 ,0 ,6 ,3817 ,3690 ,3707 ,1 ,0 ,0 ,0 ,18284 ,1206 ,432 ,7112 ,5096 ,1211509 ,0 ,0 
+BF,0 ,0 ,0 ,3446 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,53402 ,1 ,0 ,1571 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,1 ,0 ,132309 ,0 ,3363 ,4 ,0 ,6 ,0 ,0 ,4 ,0 ,1760 ,0 ,0 ,0 ,0 ,4 ,12 ,2 ,646299 ,1368556 ,0 ,0 ,0 ,1 ,1 ,0 ,0 ,0 ,13447 ,0 ,13590 ,1 ,0 ,0 ,0 ,13 ,0 ,702 ,1 ,8 ,1060 ,0 ,480728 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,94485 ,0 ,40 ,0 ,38 ,0 ,3 ,0 ,0 ,1125403 ,0 ,1474 ,0 ,0 ,10 ,1185577 ,0 ,0 ,0 ,0 ,0 ,14 ,0 ,1 ,0 ,2 ,3051 ,0 ,10 ,133 ,0 ,1 ,0 ,0 ,6 ,0 ,0 ,0 ,73 ,6 ,0 ,0 ,0 ,0 ,0 ,5498 ,16734 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,182917 ,0 ,13 ,0 ,0 ,0 ,393360 ,0 ,1854688 ,0 ,0 ,39041 ,3398 ,0 ,0 ,0 ,0 ,1 ,4900 ,0 ,0 ,0 ,5834 ,35 ,28 ,0 ,931 ,1966 ,0 ,1800 ,0 ,0 ,0 ,17390 ,23928 ,0 ,0 ,0 ,0 ,7872 ,0 
+BI,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,154885 ,1 ,640699 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10304 ,0 ,284579 ,2 ,0 ,792 ,0 ,0 ,21 ,0 ,0 ,0 ,2 ,4 ,0 ,0 ,73 ,20907 ,2190 ,53 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,22027 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,14235 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,207305 ,0 ,8 ,0 ,0 ,12 ,8791 ,0 ,0 ,0 ,0 ,1 ,2 ,0 ,8062 ,0 ,11 ,0 ,0 ,8 ,2 ,2 ,3848 ,0 ,0 ,0 ,0 ,0 ,2651 ,3 ,4 ,0 ,16797 ,0 ,0 ,0 ,27841 ,22 ,17 ,5 ,0 ,0 ,0 ,0 ,0 ,45104 ,1 ,4 ,0 ,0 ,4 ,34 ,15 ,43422 ,0 ,0 ,4790 ,0 ,0 ,0 ,0 ,0 ,0 ,2735 ,0 ,2 ,0 ,80259 ,0 ,10887 ,11329 ,1483 ,7 ,0 ,7 ,0 ,0 ,0 ,10536 ,50828 ,0 ,0 ,0 ,11628 ,377 ,0 
+KH,0 ,0 ,0 ,0 ,4 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,30101 ,2 ,66726 ,0 ,13 ,0 ,0 ,0 ,0 ,30 ,0 ,4 ,0 ,0 ,0 ,232 ,0 ,251743 ,1457 ,3 ,4 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,0 ,0 ,0 ,12952 ,478 ,182 ,0 ,0 ,5 ,0 ,0 ,2 ,12 ,0 ,0 ,0 ,6 ,11392 ,4 ,2 ,0 ,0 ,319 ,0 ,4 ,0 ,6 ,0 ,1 ,17745 ,0 ,0 ,0 ,0 ,286 ,6 ,27 ,27 ,0 ,0 ,0 ,0 ,298 ,0 ,0 ,0 ,0 ,175957 ,0 ,4621 ,0 ,1 ,0 ,7 ,0 ,0 ,0 ,0 ,3 ,1894 ,0 ,24254 ,0 ,0 ,0 ,0 ,81 ,11307 ,2 ,0 ,0 ,0 ,364 ,0 ,0 ,0 ,9139 ,2162 ,0 ,0 ,0 ,0 ,0 ,38 ,167 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,2904180 ,3054 ,250717 ,0 ,0 ,0 ,36148 ,0 ,6 ,0 ,0 ,96557 ,0 ,0 ,1 ,0 ,0 ,0 ,79686 ,0 ,5 ,0 ,8933 ,8 ,1 ,0 ,7816 ,2 ,0 ,35 ,0 ,0 ,0 ,64185 ,92501 ,0 ,0 ,28 ,0 ,3265 ,0 
+CM,0 ,0 ,0 ,0 ,0 ,0 ,168 ,0 ,0 ,0 ,16111 ,43616 ,94870 ,0 ,306075 ,0 ,0 ,0 ,0 ,0 ,0 ,2554 ,0 ,0 ,0 ,17 ,0 ,152 ,0 ,328016 ,0 ,0 ,91 ,0 ,0 ,0 ,0 ,22684 ,0 ,180 ,0 ,0 ,691640 ,1567 ,118182 ,246440 ,221761 ,0 ,305313 ,0 ,147 ,318 ,0 ,27 ,0 ,0 ,0 ,24576 ,0 ,5718 ,0 ,0 ,1 ,0 ,777 ,0 ,99 ,6 ,0 ,444964 ,0 ,0 ,0 ,0 ,261 ,1 ,0 ,0 ,133 ,0 ,102084 ,0 ,0 ,0 ,0 ,0 ,0 ,1176666 ,0 ,140 ,0 ,4975 ,113643 ,73314 ,0 ,0 ,0 ,0 ,0 ,481 ,0 ,163995 ,0 ,0 ,27063 ,0 ,24552 ,7 ,30 ,0 ,144 ,0 ,274 ,0 ,0 ,0 ,4164 ,8168 ,0 ,311526 ,114 ,0 ,0 ,21426 ,2776 ,142893 ,0 ,0 ,0 ,0 ,0 ,0 ,267303 ,4846 ,49321 ,0 ,0 ,0 ,50451 ,1 ,719632 ,0 ,0 ,15980 ,2 ,0 ,1350 ,0 ,0 ,0 ,136585 ,0 ,0 ,0 ,87764 ,0 ,171726 ,2073 ,4199 ,69175 ,0 ,0 ,0 ,0 ,0 ,34379 ,81543 ,0 ,0 ,2795 ,346 ,61515 ,0 
+CA,0 ,0 ,748967 ,0 ,13053 ,15155 ,102 ,0 ,0 ,1966 ,0 ,0 ,0 ,2846864 ,183529 ,0 ,0 ,39889 ,0 ,4500 ,9538 ,5495 ,0 ,108375 ,0 ,7512 ,0 ,0 ,0 ,0 ,0 ,5270 ,0 ,2044 ,0 ,118237 ,0 ,2179 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6901 ,2275 ,0 ,0 ,213 ,24149 ,0 ,0 ,0 ,0 ,0 ,557 ,0 ,0 ,11969 ,0 ,0 ,7518 ,0 ,15967 ,0 ,11353 ,0 ,0 ,14605 ,0 ,43 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1713362 ,3209 ,365127 ,0 ,1444899 ,117974 ,0 ,0 ,404 ,0 ,4210 ,96034 ,763172 ,0 ,101729 ,0 ,28 ,1318213 ,0 ,0 ,59016 ,0 ,0 ,5478 ,0 ,0 ,1679654 ,2429 ,715 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,499 ,0 ,0 ,143510 ,0 ,6058 ,0 ,0 ,1262 ,0 ,8206592 ,1694 ,0 ,0 ,0 ,148852 ,0 ,2430 ,0 ,0 ,3143 ,2 ,696 ,2043287 ,0 ,436 ,0 ,2940 ,8 ,15387 ,0 ,0 ,44722 ,0 ,0 ,10 ,0 ,0 ,9442 ,6050 ,18803 ,0 ,0 ,0 ,0 ,4638 ,6443 ,1387 ,0 ,657 ,9883006 ,0 ,0 
+CV,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,223 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,278 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1459 ,119 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,80 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,26743 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,156 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1818 ,0 ,0 ,0 ,165 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,342 ,0 ,0 ,0 ,0 ,0 ,0 
+KY,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,79 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 
+CF,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,681 ,30 ,18303 ,0 ,660 ,0 ,0 ,0 ,0 ,6 ,0 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,247911 ,0 ,0 ,120 ,0 ,0 ,0 ,0 ,13 ,0 ,0 ,0 ,0 ,3614 ,0 ,16387 ,42441 ,27 ,0 ,228 ,0 ,10 ,2 ,0 ,0 ,0 ,0 ,18 ,57 ,0 ,0 ,0 ,0 ,496 ,0 ,2 ,0 ,0 ,0 ,0 ,109172 ,0 ,0 ,0 ,0 ,0 ,288 ,0 ,0 ,0 ,0 ,220 ,0 ,337 ,0 ,0 ,0 ,0 ,110855 ,0 ,1726 ,0 ,13 ,28216 ,8921 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,762 ,0 ,0 ,17 ,0 ,22 ,4712 ,2 ,1 ,0 ,0 ,1 ,0 ,0 ,1 ,58 ,2243 ,0 ,32584 ,0 ,0 ,0 ,1442 ,20266 ,1218 ,0 ,0 ,0 ,0 ,0 ,0 ,5359 ,11 ,869 ,0 ,0 ,0 ,21368 ,693 ,29966 ,0 ,0 ,3 ,0 ,0 ,2 ,0 ,0 ,0 ,20234 ,0 ,3 ,0 ,144 ,0 ,16531 ,0 ,557 ,70 ,0 ,1 ,0 ,0 ,0 ,4775 ,10651 ,0 ,0 ,3 ,1 ,58071 ,0 
+TD,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,178 ,59 ,74 ,0 ,187809 ,0 ,0 ,0 ,0 ,9 ,0 ,18 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,31677 ,0 ,0 ,323726 ,0 ,0 ,0 ,0 ,26 ,0 ,0 ,0 ,0 ,0 ,10 ,56 ,181012 ,8853 ,0 ,585 ,0 ,9011 ,3 ,0 ,0 ,0 ,0 ,27 ,16549 ,0 ,0 ,0 ,0 ,3 ,0 ,3 ,0 ,0 ,0 ,0 ,642573 ,0 ,0 ,0 ,0 ,1 ,3 ,0 ,0 ,0 ,0 ,556 ,0 ,2 ,0 ,0 ,0 ,0 ,348772 ,0 ,7575 ,0 ,25 ,32206 ,1125019 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,29 ,0 ,0 ,139 ,0 ,1332 ,23 ,0 ,0 ,1 ,0 ,1 ,0 ,0 ,0 ,29 ,11 ,0 ,100 ,1 ,0 ,0 ,3972 ,45346 ,550 ,0 ,0 ,0 ,0 ,0 ,0 ,165672 ,19 ,0 ,0 ,0 ,0 ,247734 ,6 ,972487 ,0 ,0 ,118 ,0 ,0 ,12 ,0 ,0 ,0 ,4376 ,0 ,3 ,0 ,30379 ,0 ,10321 ,9 ,158 ,134 ,0 ,1 ,0 ,0 ,0 ,7645 ,6304 ,0 ,0 ,7 ,1013 ,40622 ,0 
+CL,0 ,0 ,64966 ,8930 ,0 ,31384 ,598 ,0 ,1366 ,1996 ,27572 ,0 ,27 ,28989 ,7480 ,0 ,0 ,0 ,0 ,7 ,0 ,2367 ,682 ,0 ,0 ,3609 ,0 ,0 ,0 ,12 ,0 ,1811 ,1 ,38156 ,1174 ,269 ,0 ,690 ,0 ,0 ,0 ,2998 ,47 ,0 ,137 ,1 ,0 ,0 ,1497 ,0 ,0 ,0 ,0 ,77 ,2672 ,0 ,8150 ,2738 ,1962 ,0 ,0 ,178754 ,246 ,47600 ,2598 ,2379 ,10021 ,0 ,1788 ,2 ,0 ,4458 ,2222 ,0 ,0 ,9842 ,0 ,0 ,0 ,7547 ,0 ,0 ,7322 ,1126 ,7804 ,2434 ,12860 ,61885 ,19316 ,72 ,0 ,3294 ,0 ,1 ,0 ,82835 ,0 ,0 ,0 ,0 ,90695 ,0 ,0 ,0 ,0 ,21428 ,7979 ,6249 ,135 ,1157 ,14029 ,7096 ,0 ,0 ,0 ,0 ,882 ,2 ,0 ,56 ,16726 ,0 ,0 ,44449 ,0 ,4011 ,0 ,320 ,19 ,0 ,37887 ,0 ,26249 ,15 ,0 ,527 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1961 ,0 ,1039 ,0 ,1136 ,0 ,12081 ,5 ,0 ,3591 ,0 ,1375 ,8063 ,0 ,0 ,2191 ,11008 ,0 ,0 ,1 ,0 ,0 ,5917 ,6591 ,0 ,41156 ,2961 ,208334 ,0 ,0 
+CN,0 ,0 ,0 ,12322 ,38441 ,1822785 ,17173 ,46195 ,11692 ,1341499 ,17153 ,0 ,337207 ,266893 ,736894 ,0 ,4866 ,0 ,0 ,822883 ,626834 ,960703 ,0 ,0 ,0 ,386670 ,0 ,247 ,0 ,299037 ,14985 ,458223 ,17531 ,7894 ,291702 ,2511 ,0 ,709629 ,39933 ,171055 ,885 ,0 ,0 ,37193 ,35519 ,3049017 ,10460 ,0 ,1244953 ,1 ,11833 ,770340 ,6 ,2365 ,7089 ,0 ,1359676 ,733777 ,796246 ,56255 ,0 ,726722 ,85461 ,367 ,620868 ,10462 ,18950 ,21913 ,1289498 ,4450517 ,11754 ,11771 ,11087 ,2731 ,11030 ,20937 ,0 ,0 ,0 ,26983 ,0 ,0 ,124265 ,64714 ,581293 ,254505 ,1 ,40232504 ,374 ,178243 ,0 ,376305 ,19935 ,888805 ,0 ,1649 ,129091 ,23228 ,228 ,23925 ,160085 ,50637 ,0 ,122127 ,0 ,0 ,1042660 ,379458 ,5389 ,920605 ,746685 ,844769 ,17807 ,0 ,887555 ,0 ,31439 ,88161 ,26323 ,14 ,1857464 ,0 ,0 ,4231462 ,56056 ,385974 ,0 ,30675 ,0 ,32754 ,6743603 ,1 ,26263964 ,3285 ,722189 ,173043 ,0 ,22343 ,281051 ,2692 ,720132 ,0 ,1 ,9514740 ,30580 ,699929 ,16992 ,107126 ,1318 ,191577 ,1317170 ,32 ,900120 ,0 ,2250959 ,2103917 ,96308 ,3270360 ,924307 ,1074066 ,191443 ,1019651 ,159206 ,0 ,2444 ,2197058 ,9741370 ,23 ,276200 ,1371842 ,20716210 ,7 ,0 
+CO,6 ,17782 ,4 ,0 ,0 ,582 ,0 ,0 ,0 ,913 ,74587 ,0 ,94846 ,2943 ,92665 ,0 ,1 ,0 ,0 ,1202 ,0 ,2149 ,0 ,0 ,0 ,8812 ,0 ,2324 ,1 ,106606 ,2 ,2883 ,1218 ,0 ,0 ,77 ,0 ,9997 ,0 ,19093 ,0 ,0 ,180863 ,22483 ,839148 ,9476 ,0 ,0 ,3106 ,0 ,6 ,776 ,0 ,101 ,0 ,0 ,0 ,62163 ,773 ,0 ,0 ,3999 ,21 ,0 ,5581 ,4 ,1 ,11195 ,23702 ,2671 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,22576 ,4251 ,8000 ,0 ,2 ,334207 ,0 ,33219 ,0 ,7227 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,163 ,2443 ,547790 ,0 ,0 ,0 ,0 ,25494 ,20206 ,7279 ,29440 ,2513 ,1793 ,0 ,0 ,0 ,514 ,3407 ,22633 ,0 ,287829 ,1203 ,0 ,0 ,124361 ,0 ,13966 ,0 ,0 ,700 ,0 ,5 ,0 ,509379 ,13463 ,4507 ,0 ,0 ,0 ,4306 ,3 ,1608 ,0 ,0 ,45298 ,2228 ,1408 ,0 ,1849 ,0 ,1217 ,369360 ,0 ,2 ,0 ,1 ,17266 ,0 ,63 ,3897 ,9101 ,0 ,58043 ,0 ,0 ,0 ,3448 ,16893 ,0 ,0 ,12582 ,2748 ,34548 ,3 
+KM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+CG,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,995 ,2 ,12276 ,0 ,5065 ,0 ,0 ,0 ,0 ,0 ,0 ,94 ,0 ,0 ,0 ,61 ,0 ,0 ,0 ,149426 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,3 ,0 ,0 ,21041 ,864 ,9668 ,4 ,3 ,0 ,21 ,0 ,0 ,29 ,0 ,0 ,0 ,0 ,0 ,5197 ,0 ,0 ,0 ,0 ,290 ,0 ,895 ,0 ,0 ,1 ,0 ,47853 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,20 ,0 ,416 ,0 ,15 ,0 ,0 ,12905 ,0 ,3853 ,0 ,1 ,7047 ,15576 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,12412 ,0 ,0 ,0 ,0 ,21 ,589 ,44 ,7800 ,0 ,0 ,0 ,0 ,0 ,12 ,1 ,958 ,0 ,11751 ,0 ,0 ,0 ,667 ,3 ,20 ,0 ,0 ,0 ,0 ,0 ,0 ,2037 ,6629 ,2152 ,0 ,0 ,0 ,583 ,0 ,15 ,0 ,0 ,54 ,0 ,0 ,1 ,0 ,0 ,0 ,18110 ,0 ,409 ,0 ,1249 ,603 ,147 ,0 ,1106 ,722 ,0 ,0 ,0 ,0 ,0 ,3821 ,7906 ,0 ,0 ,0 ,0 ,3410 ,0 
+CR,1069 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3506 ,0 ,48371 ,0 ,9189 ,0 ,54 ,0 ,0 ,0 ,0 ,503 ,0 ,0 ,0 ,350 ,0 ,0 ,0 ,9615 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,83 ,0 ,0 ,0 ,0 ,5780 ,1607 ,65518 ,853 ,0 ,0 ,83 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,53279 ,0 ,273 ,0 ,0 ,2518 ,0 ,0 ,0 ,0 ,0 ,0 ,204 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1442 ,0 ,87 ,0 ,0 ,7829 ,0 ,4999 ,0 ,2896 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,167 ,0 ,66902 ,0 ,0 ,0 ,0 ,1706 ,9768 ,867 ,0 ,0 ,0 ,239 ,0 ,0 ,1 ,0 ,34691 ,0 ,6897 ,0 ,0 ,0 ,2752 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,37944 ,1216 ,0 ,0 ,0 ,0 ,261 ,0 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,151 ,0 ,0 ,56108 ,0 ,0 ,0 ,218 ,0 ,0 ,0 ,20 ,981 ,0 ,0 ,0 ,0 ,0 ,2483 ,3242 ,0 ,0 ,1930 ,0 ,990 ,284 
+HR,0 ,0 ,3937 ,820 ,3 ,4516 ,294 ,0 ,0 ,97 ,0 ,0 ,0 ,64719 ,1992 ,5813 ,967 ,0 ,0 ,980 ,26 ,1834 ,0 ,12 ,525 ,324 ,3 ,0 ,0 ,0 ,0 ,134 ,0 ,1005 ,152 ,150 ,131 ,808 ,0 ,0 ,0 ,23758 ,0 ,0 ,0 ,0 ,146 ,0 ,140 ,2 ,0 ,0 ,0 ,627 ,0 ,0 ,0 ,13 ,329 ,0 ,2 ,18456 ,0 ,330 ,669 ,0 ,3976 ,0 ,629 ,0 ,4705 ,0 ,1 ,15 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,146 ,0 ,30 ,327 ,1 ,1 ,288709 ,12057 ,0 ,0 ,85 ,0 ,159 ,290 ,109 ,0 ,0 ,0 ,0 ,11405 ,0 ,0 ,5097 ,0 ,18135 ,753 ,52 ,0 ,730 ,820 ,791 ,0 ,0 ,0 ,0 ,293 ,0 ,0 ,0 ,3909 ,0 ,57 ,9159 ,180 ,244 ,0 ,89 ,0 ,0 ,41792 ,138 ,0 ,0 ,0 ,914 ,0 ,0 ,0 ,0 ,373 ,0 ,2166 ,77839 ,0 ,1 ,0 ,331 ,0 ,10827 ,0 ,0 ,37544 ,0 ,0 ,2041 ,0 ,0 ,3512 ,509 ,6628 ,0 ,0 ,21 ,0 ,4469 ,1131 ,674 ,7111 ,614 ,146931 ,0 ,0 
+CU,0 ,8344 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,272 ,0 ,35642 ,0 ,75439 ,0 ,0 ,0 ,0 ,0 ,0 ,2471 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,97274 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7532 ,0 ,473 ,0 ,0 ,2849 ,7619 ,23181 ,0 ,0 ,0 ,6879 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,12711 ,1779 ,0 ,0 ,0 ,2848 ,0 ,0 ,0 ,0 ,0 ,0 ,5435 ,0 ,0 ,0 ,0 ,0 ,9859 ,0 ,0 ,0 ,0 ,0 ,0 ,657 ,0 ,0 ,0 ,0 ,121119 ,0 ,46854 ,0 ,6281 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6539 ,4275 ,7929 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4447 ,0 ,64470 ,0 ,0 ,0 ,5698 ,0 ,29603 ,0 ,0 ,0 ,0 ,0 ,0 ,72612 ,0 ,0 ,0 ,0 ,0 ,0 ,812 ,1039 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,288393 ,0 ,0 ,0 ,34817 ,3077 ,0 ,0 ,15276 ,25598 ,0 ,578 ,0 ,0 ,0 ,40685 ,54230 ,0 ,0 ,4022 ,0 ,7568 ,7177 
+CY,0 ,0 ,110 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,110 ,0 ,205 ,22577 ,139 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,58 ,0 ,53 ,0 ,295 ,0 ,0 ,0 ,0 ,0 ,0 ,145 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3988 ,226 ,19 ,0 ,0 ,0 ,0 ,2929 ,0 ,81 ,0 ,0 ,0 ,15 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,39 ,0 ,3557 ,0 ,11 ,99 ,0 ,0 ,1099 ,72 ,0 ,0 ,196 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,407 ,0 ,0 ,0 ,72 ,7254 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4185 ,170 ,140 ,0 ,13 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,490 ,0 ,0 ,0 ,98 ,0 ,21 ,0 ,0 ,128 ,0 ,0 ,0 ,938 ,580 ,71 ,0 ,0 ,7385 ,53 ,0 
+CZ,0 ,0 ,54729 ,0 ,0 ,7374 ,1223 ,0 ,0 ,11 ,0 ,0 ,0 ,324432 ,8 ,7527 ,728 ,1 ,0 ,897 ,16 ,1404 ,0 ,0 ,0 ,896 ,0 ,0 ,0 ,0 ,0 ,362 ,5275 ,913 ,0 ,0 ,0 ,289 ,0 ,0 ,0 ,52793 ,0 ,0 ,0 ,0 ,0 ,0 ,397 ,785 ,0 ,0 ,0 ,0 ,4574 ,0 ,1064 ,3526 ,521 ,0 ,1344 ,15510 ,0 ,623 ,232 ,33 ,0 ,0 ,1409 ,0 ,0 ,234 ,0 ,5003 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,215 ,0 ,0 ,612 ,1270 ,1362 ,84079 ,62146 ,0 ,0 ,0 ,0 ,1024 ,1473 ,62537 ,0 ,30229 ,0 ,0 ,37227 ,0 ,1061 ,43486 ,0 ,0 ,1879 ,0 ,0 ,32613 ,374 ,817 ,0 ,0 ,0 ,0 ,4579 ,0 ,0 ,0 ,1829 ,0 ,30575 ,24107 ,2003 ,0 ,0 ,0 ,0 ,0 ,371183 ,20 ,0 ,0 ,0 ,30569 ,0 ,0 ,0 ,0 ,33 ,0 ,1297 ,13504 ,0 ,338 ,1 ,506 ,0 ,60303 ,0 ,0 ,11533 ,0 ,0 ,0 ,0 ,0 ,1 ,287 ,31989 ,0 ,0 ,900 ,0 ,6164 ,10356 ,182 ,191 ,0 ,799963 ,0 ,0 
+CI,0 ,0 ,0 ,2107 ,0 ,0 ,0 ,0 ,0 ,0 ,4808 ,173 ,13725 ,0 ,44366 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1774746 ,0 ,1143540 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,3852 ,0 ,3370 ,0 ,0 ,4717917 ,41468 ,736998 ,436214 ,7845 ,0 ,1139 ,0 ,0 ,19740 ,0 ,0 ,0 ,12147 ,0 ,3802 ,0 ,264 ,0 ,0 ,2636 ,0 ,1173 ,0 ,71700 ,840 ,0 ,158228 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,23341 ,0 ,84169 ,0 ,2 ,0 ,0 ,0 ,0 ,554139 ,0 ,145970 ,0 ,1 ,2 ,82259 ,0 ,0 ,0 ,0 ,0 ,8167 ,0 ,357205 ,0 ,8040 ,40956 ,0 ,4 ,3180 ,4917 ,0 ,0 ,0 ,124 ,0 ,0 ,0 ,10788 ,862 ,0 ,500986 ,0 ,0 ,0 ,14 ,19893 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,512818 ,2154 ,526051 ,0 ,0 ,0 ,14512 ,4 ,101133 ,0 ,0 ,226 ,1128 ,0 ,0 ,0 ,0 ,1 ,25989 ,0 ,0 ,0 ,32137 ,0 ,72135 ,0 ,15710 ,4753 ,0 ,34926 ,0 ,0 ,0 ,12322 ,19564 ,0 ,0 ,0 ,9 ,1199689 ,0 
+CD,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8628 ,26134 ,217182 ,1430 ,478845 ,0 ,0 ,0 ,0 ,0 ,0 ,1213 ,0 ,0 ,0 ,40 ,0 ,47 ,0 ,4960414 ,228 ,0 ,0 ,0 ,0 ,31 ,0 ,0 ,0 ,227 ,0 ,0 ,22604 ,18 ,76370 ,70057 ,159491 ,0 ,72 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11003 ,0 ,0 ,0 ,0 ,616 ,0 ,1033 ,0 ,0 ,214 ,0 ,491444 ,0 ,0 ,0 ,0 ,0 ,7146 ,0 ,0 ,0 ,0 ,0 ,0 ,449 ,0 ,369 ,0 ,0 ,2723103 ,0 ,17660 ,0 ,0 ,103236 ,66682 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,321011 ,0 ,0 ,0 ,0 ,10496 ,10819 ,12385 ,3543 ,0 ,0 ,2 ,0 ,0 ,11093 ,7506 ,7748 ,0 ,1098225 ,0 ,0 ,0 ,22189 ,99572 ,2896 ,2 ,0 ,0 ,0 ,0 ,0 ,1312252 ,111662 ,52790 ,0 ,0 ,0 ,10441 ,13 ,8043 ,0 ,0 ,46959 ,8 ,0 ,0 ,0 ,0 ,0 ,46239 ,0 ,1031 ,0 ,108012 ,9 ,18768 ,9743 ,7805 ,6651 ,0 ,19 ,0 ,0 ,0 ,49419 ,67838 ,0 ,0 ,0 ,7916 ,24909 ,0 
+DK,0 ,0 ,900 ,0 ,100 ,1391 ,0 ,0 ,0 ,82 ,0 ,0 ,0 ,656445 ,0 ,19246 ,0 ,0 ,0 ,18341 ,0 ,1469 ,0 ,0 ,0 ,1988 ,0 ,0 ,0 ,0 ,0 ,936 ,0 ,183 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,37266 ,0 ,0 ,0 ,0 ,0 ,0 ,49 ,723 ,0 ,0 ,0 ,0 ,0 ,0 ,37187 ,0 ,0 ,0 ,1 ,0 ,0 ,36881 ,0 ,0 ,0 ,0 ,3164 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,655 ,3378 ,0 ,6157 ,36140 ,0 ,0 ,0 ,0 ,0 ,2135 ,0 ,41 ,10 ,0 ,0 ,62750 ,0 ,53 ,0 ,0 ,0 ,1360 ,0 ,0 ,7329 ,0 ,307 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,89 ,0 ,0 ,59556 ,1409 ,0 ,0 ,0 ,0 ,0 ,144641 ,109 ,1 ,0 ,0 ,109114 ,36924 ,0 ,0 ,0 ,0 ,0 ,475 ,35 ,0 ,80 ,0 ,1059 ,0 ,32540 ,0 ,0 ,3595 ,0 ,0 ,0 ,0 ,0 ,2 ,31 ,4064 ,0 ,0 ,0 ,0 ,1004 ,9603 ,0 ,0 ,0 ,501909 ,0 ,0 
+DJ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4053 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,61 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,152 ,4088 ,0 ,0 ,0 ,0 ,0 ,0 
+DM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2249 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,120 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4601 ,2189 ,471 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,102 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,665 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,212 ,0 ,0 ,0 ,349 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1006 ,0 
+DO,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,32052 ,0 ,28976 ,0 ,39180 ,0 ,0 ,0 ,0 ,9296 ,0 ,838 ,0 ,0 ,0 ,1880 ,0 ,9036 ,0 ,24575 ,7 ,0 ,0 ,0 ,0 ,1 ,0 ,7571 ,0 ,0 ,0 ,0 ,170067 ,48483 ,80975 ,4 ,30 ,0 ,895 ,0 ,0 ,3716 ,0 ,0 ,0 ,0 ,0 ,5249 ,351 ,56 ,0 ,0 ,654 ,0 ,0 ,0 ,0 ,0 ,0 ,5284 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,21628 ,0 ,1548 ,0 ,0 ,29111 ,0 ,2986 ,0 ,1488 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19764 ,0 ,0 ,0 ,0 ,4694 ,11561 ,10156 ,444 ,0 ,0 ,0 ,0 ,0 ,22144 ,0 ,8102 ,0 ,48694 ,0 ,0 ,0 ,3339 ,0 ,8169 ,0 ,0 ,0 ,0 ,0 ,0 ,185832 ,127 ,0 ,0 ,0 ,0 ,44 ,191 ,283 ,0 ,0 ,0 ,1157 ,0 ,0 ,0 ,0 ,0 ,105794 ,0 ,0 ,0 ,7112 ,10 ,0 ,0 ,8646 ,6301 ,0 ,0 ,0 ,0 ,0 ,1225 ,17087 ,0 ,0 ,0 ,0 ,4798 ,4767 
+EC,26966 ,3076 ,76 ,0 ,26 ,1426 ,70 ,0 ,0 ,458 ,4858 ,0 ,150467 ,11184 ,18591 ,0 ,3461 ,0 ,1 ,1794 ,0 ,1969 ,0 ,0 ,0 ,6369 ,0 ,0 ,0 ,15021 ,1989 ,12855 ,5 ,0 ,0 ,1 ,0 ,2135 ,0 ,7631 ,0 ,0 ,520152 ,2251 ,28652 ,3033 ,17 ,0 ,520 ,0 ,0 ,0 ,0 ,27 ,0 ,0 ,0 ,20203 ,797 ,0 ,0 ,76 ,420 ,0 ,6917 ,5158 ,10335 ,10903 ,5525 ,18883 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5600 ,3569 ,2245 ,166 ,3534 ,314594 ,0 ,14802 ,0 ,1657 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1173 ,188740 ,0 ,0 ,0 ,4 ,28 ,13863 ,3684 ,1463 ,1400 ,2294 ,2069 ,0 ,0 ,0 ,1 ,3221 ,0 ,127036 ,1204 ,0 ,0 ,24723 ,1 ,1168 ,279 ,0 ,5239 ,0 ,0 ,0 ,312461 ,9395 ,12574 ,126 ,0 ,0 ,22 ,0 ,8235 ,0 ,0 ,19334 ,852 ,0 ,0 ,98 ,4 ,726 ,137170 ,0 ,126 ,0 ,2078 ,6784 ,0 ,627 ,6311 ,2619 ,0 ,7256 ,0 ,0 ,0 ,2210 ,3925 ,0 ,0 ,4671 ,6749 ,30334 ,4 
+EG,0 ,0 ,14281 ,484 ,27267 ,15688 ,4311 ,0 ,12704 ,0 ,0 ,0 ,21630 ,25926 ,26379 ,0 ,47 ,0 ,0 ,20146 ,0 ,14616 ,0 ,0 ,0 ,5265 ,0 ,0 ,0 ,0 ,0 ,3309 ,0 ,2 ,0 ,1660 ,0 ,1174 ,0 ,254 ,0 ,51670 ,0 ,0 ,0 ,51838 ,1924 ,0 ,20446 ,0 ,41363 ,35596 ,0 ,16935 ,7021 ,0 ,0 ,23994 ,12167 ,0 ,0 ,43786 ,104 ,0 ,14649 ,2132 ,0 ,2038 ,15509 ,41110 ,0 ,0 ,0 ,0 ,861 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11478 ,442 ,4351 ,7506 ,97 ,1043851 ,0 ,82381 ,0 ,8120 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,1507 ,0 ,0 ,0 ,0 ,4610 ,43141 ,61403 ,82236 ,0 ,77 ,10900 ,3625 ,0 ,0 ,767 ,0 ,12943 ,0 ,0 ,0 ,1222 ,0 ,0 ,118977 ,3078 ,14639 ,0 ,0 ,0 ,0 ,0 ,0 ,509379 ,820 ,0 ,26036 ,0 ,0 ,24592 ,0 ,126452 ,0 ,0 ,8527 ,0 ,1724 ,115 ,12585 ,0 ,97427 ,83429 ,0 ,8348 ,0 ,11083 ,30145 ,3070 ,0 ,0 ,105344 ,0 ,1831 ,0 ,0 ,0 ,23969 ,83260 ,659 ,3452 ,29341 ,487052 ,0 ,0 
+SV,0 ,3939 ,0 ,0 ,0 ,3024 ,0 ,0 ,0 ,0 ,1304 ,0 ,1113 ,1 ,107324 ,0 ,0 ,0 ,0 ,7 ,0 ,81 ,0 ,0 ,0 ,1 ,0 ,1587 ,0 ,1162 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,241 ,0 ,1 ,0 ,0 ,860 ,2664 ,140767 ,87 ,0 ,0 ,261 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,1680 ,0 ,0 ,0 ,1 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,3978 ,0 ,0 ,0 ,0 ,0 ,0 ,1346 ,0 ,1 ,0 ,0 ,243173 ,0 ,3739 ,0 ,51 ,0 ,0 ,0 ,0 ,0 ,0 ,18 ,2 ,0 ,2 ,0 ,0 ,0 ,5404 ,147 ,1571 ,64 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,72 ,0 ,1820 ,0 ,0 ,0 ,229 ,1 ,858 ,0 ,0 ,0 ,0 ,0 ,0 ,3716 ,1 ,13 ,0 ,0 ,0 ,2150 ,0 ,58689 ,0 ,0 ,2712 ,0 ,0 ,0 ,0 ,0 ,0 ,72372 ,0 ,0 ,0 ,122 ,486 ,0 ,338 ,851 ,515 ,0 ,0 ,0 ,0 ,0 ,1385 ,1569 ,0 ,0 ,1676 ,1 ,5737 ,4561 
+GQ,1688 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9 ,6388 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,24177 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,0 ,0 ,9971 ,4363 ,11361 ,12 ,0 ,0 ,42 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,36 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,42 ,0 ,0 ,0 ,0 ,0 ,0 ,276 ,0 ,0 ,0 ,4 ,42 ,36 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3546 ,0 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,7918 ,0 ,0 ,0 ,21 ,2 ,42 ,0 ,0 ,0 ,0 ,0 ,0 ,42 ,5600 ,6 ,0 ,0 ,0 ,19 ,0 ,48 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,18855 ,0 ,6 ,3 ,0 ,20 ,0 ,0 ,0 ,0 ,0 ,39 ,2 ,0 ,0 ,1 ,0 ,8 ,0 
+ER,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,44874 ,1854 ,0 ,0 ,0 ,0 ,560 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,37026 ,0 ,0 ,8715 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,24 ,0 ,0 ,0 ,0 ,1 ,0 ,42 ,0 ,0 ,0 ,6 ,671 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3012 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,563 ,0 ,631 ,0 ,19908 ,0 ,2 ,0 ,0 ,0 ,74027 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,0 ,0 ,49238 ,0 ,0 ,2 ,0 ,2 ,1614 ,0 ,0 ,0 ,0 ,0 ,0 ,52 ,0 ,0 ,0 ,0 ,0 ,0 ,136 ,31816 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,15827 ,0 ,0 ,0 ,13 ,23799 ,0 ,268844 ,0 ,0 ,6 ,654 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,1 ,0 ,5 ,0 ,0 ,1 ,1 ,3 ,0 ,1 ,0 ,0 ,0 ,8671 ,14724 ,3403 ,0 ,0 ,24957 ,6698 ,0 
+EE,0 ,0 ,0 ,0 ,0 ,871 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,129168 ,172 ,0 ,1032 ,0 ,0 ,13357 ,213 ,1167 ,0 ,0 ,0 ,460 ,0 ,0 ,0 ,0 ,0 ,47 ,1438 ,610 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,101 ,370 ,0 ,0 ,0 ,0 ,123 ,0 ,7 ,0 ,70 ,0 ,439 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,258 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,70 ,0 ,44034 ,351 ,0 ,0 ,0 ,0 ,0 ,628 ,30272 ,0 ,0 ,0 ,0 ,32940 ,0 ,0 ,5255 ,0 ,0 ,36 ,0 ,0 ,33794 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,30 ,0 ,0 ,3258 ,60 ,0 ,0 ,0 ,0 ,0 ,67036 ,114 ,0 ,0 ,0 ,14643 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,22 ,0 ,0 ,0 ,704 ,0 ,184 ,0 ,0 ,1488 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,2513 ,0 ,0 ,0 ,0 ,2317 ,3190 ,0 ,0 ,0 ,132583 ,0 ,0 
+ET,0 ,0 ,0 ,0 ,5433 ,0 ,0 ,0 ,0 ,0 ,28566 ,0 ,94111 ,507438 ,185321 ,0 ,0 ,0 ,0 ,483241 ,0 ,42219 ,0 ,0 ,0 ,3125 ,0 ,0 ,0 ,1 ,5502 ,0 ,2843189 ,0 ,0 ,180838 ,0 ,9628 ,0 ,432 ,0 ,0 ,0 ,4 ,836637 ,80102 ,33 ,0 ,60 ,0 ,6 ,2 ,310096 ,0 ,0 ,0 ,28 ,13919 ,15091 ,3278 ,0 ,2368 ,1 ,0 ,1608 ,342 ,0 ,2911 ,486 ,111843 ,0 ,0 ,0 ,0 ,0 ,1393 ,0 ,0 ,0 ,0 ,0 ,0 ,1365 ,68094 ,1200 ,78229 ,0 ,1322882 ,0 ,21603 ,0 ,0 ,0 ,476950 ,0 ,0 ,0 ,4179 ,390 ,58000 ,20191 ,0 ,0 ,187042 ,0 ,0 ,36751 ,4889 ,5191 ,214414 ,19 ,0 ,6330 ,0 ,0 ,0 ,215442 ,725 ,0 ,1 ,0 ,0 ,0 ,85102 ,99474 ,1 ,2 ,0 ,0 ,0 ,8361 ,0 ,46669 ,267061 ,0 ,0 ,0 ,8103 ,338930 ,930 ,1753768 ,0 ,0 ,81251 ,269901 ,0 ,0 ,0 ,0 ,0 ,28822 ,0 ,3764 ,0 ,36501 ,2877 ,0 ,9841 ,3308 ,6318 ,0 ,6085 ,0 ,0 ,0 ,136437 ,109035 ,138539 ,0 ,1 ,1824178 ,5504 ,0 
+MK,0 ,0 ,9380 ,493 ,1083 ,11490 ,368 ,0 ,2 ,221 ,0 ,0 ,0 ,44694 ,5149 ,483 ,0 ,0 ,0 ,8439 ,0 ,5432 ,0 ,0 ,6 ,393 ,0 ,0 ,0 ,0 ,0 ,35 ,24 ,6261 ,772 ,858 ,0 ,8976 ,0 ,0 ,0 ,2412 ,0 ,0 ,0 ,140 ,1958 ,0 ,953 ,7 ,0 ,41 ,0 ,56 ,0 ,0 ,0 ,395 ,981 ,0 ,0 ,21908 ,0 ,183 ,12420 ,2 ,19 ,92 ,1064 ,0 ,1 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,3619 ,6 ,71 ,9 ,0 ,0 ,32297 ,2597 ,0 ,0 ,44 ,1 ,25 ,0 ,0 ,0 ,5 ,0 ,30 ,3488 ,0 ,0 ,6 ,0 ,5529 ,3636 ,25 ,0 ,844 ,1595 ,4792 ,0 ,0 ,0 ,0 ,3 ,0 ,3 ,0 ,7908 ,0 ,65 ,12935 ,99 ,8 ,0 ,152 ,0 ,0 ,46 ,46 ,3223 ,0 ,0 ,3935 ,0 ,0 ,40 ,0 ,28 ,0 ,1743 ,14 ,76 ,9 ,0 ,823 ,0 ,113 ,0 ,0 ,4567 ,0 ,0 ,3 ,0 ,0 ,15874 ,5496 ,13 ,0 ,0 ,0 ,0 ,551 ,1978 ,2056 ,8526 ,5305 ,70577 ,0 ,0 
+FK,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+FO,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+FJ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,975 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3756 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,8064 ,23 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,407 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,493 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2487 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,38369 ,0 ,0 ,0 ,1522 ,0 ,0 ,0 ,601 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2934 ,0 ,0 ,0 ,0 ,318 ,0 
+FI,0 ,0 ,0 ,0 ,0 ,652 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,399838 ,0 ,0 ,286 ,0 ,0 ,3139 ,0 ,818 ,0 ,0 ,0 ,1714 ,0 ,0 ,0 ,0 ,0 ,548 ,545 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,235 ,1896 ,0 ,0 ,0 ,0 ,0 ,0 ,9 ,0 ,30 ,0 ,15 ,0 ,0 ,0 ,29 ,0 ,0 ,0 ,4929 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,313 ,0 ,347963 ,21 ,0 ,0 ,0 ,0 ,0 ,16252 ,62705 ,0 ,1 ,0 ,0 ,293982 ,0 ,0 ,0 ,0 ,0 ,1206 ,0 ,0 ,18400 ,0 ,28 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,21056 ,0 ,0 ,0 ,0 ,0 ,0 ,24575 ,360 ,12 ,0 ,0 ,14543 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,594 ,0 ,0 ,0 ,4449 ,0 ,10759 ,0 ,0 ,837 ,24383 ,0 ,0 ,0 ,0 ,0 ,100 ,8 ,0 ,0 ,0 ,0 ,1804 ,9571 ,0 ,0 ,0 ,200624 ,0 ,0 
+FR,0 ,0 ,285609 ,1239 ,0 ,50652 ,12290 ,0 ,4781 ,4862 ,173 ,0 ,5533 ,1948031 ,2914 ,27287 ,3 ,345 ,0 ,75950 ,17926 ,6958 ,31517 ,0 ,3 ,12716 ,0 ,0 ,0 ,0 ,0 ,18191 ,21060 ,7390 ,8489 ,0 ,4017 ,1139 ,0 ,0 ,0 ,41794 ,0 ,0 ,0 ,0 ,0 ,0 ,1734 ,2699 ,0 ,797 ,0 ,438 ,133508 ,0 ,165 ,3 ,3271 ,0 ,4 ,766939 ,368 ,321060 ,32764 ,580 ,174834 ,2269 ,44918 ,0 ,5345 ,14218 ,6376 ,505 ,0 ,0 ,0 ,0 ,0 ,3784 ,0 ,32430 ,903 ,11937 ,18020 ,31904 ,5837 ,1686857 ,382343 ,0 ,0 ,13216 ,0 ,10976 ,104479 ,383155 ,2707 ,861 ,0 ,0 ,79977 ,0 ,32445 ,0 ,0 ,9176 ,17239 ,781 ,0 ,222891 ,9516 ,5556 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14976 ,0 ,11329 ,210694 ,51499 ,7974 ,0 ,61 ,0 ,0 ,1131955 ,695 ,14706 ,0 ,0 ,29984 ,348224 ,0 ,0 ,0 ,111449 ,11210 ,580 ,185496 ,0 ,5354 ,0 ,3361 ,33761 ,422204 ,0 ,0 ,783781 ,0 ,0 ,2161 ,0 ,0 ,1648 ,6004 ,215749 ,3992 ,0 ,1389 ,0 ,201150 ,4423 ,9 ,24389 ,947 ,4532558 ,0 ,0 
+GF,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,40 ,0 ,668 ,0 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,243 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,4021 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,91 ,0 ,0 ,0 ,0 ,99 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,18 ,0 ,0 ,0 ,0 ,24 ,0 ,167 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,246 ,0 ,1 ,0 ,0 ,241 ,0 ,61 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,210 ,36 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,75 ,0 ,283 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2000 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,80 ,0 ,0 ,0 ,0 ,50 ,448 ,0 ,0 ,77 ,0 ,70 ,0 ,0 ,0 ,242 ,0 ,0 ,0 ,0 ,0 ,1 ,0 
+PF,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,78 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7672 ,32 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,24 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+TF,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+GA,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,31 ,1 ,2451 ,0 ,34 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,63889 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,209 ,0 ,0 ,4572 ,111 ,785 ,41 ,0 ,0 ,6 ,0 ,0 ,17 ,0 ,0 ,0 ,0 ,0 ,5517 ,0 ,0 ,0 ,0 ,11 ,0 ,46 ,0 ,0 ,0 ,0 ,22777 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,15 ,0 ,0 ,0 ,0 ,28636 ,0 ,105 ,0 ,0 ,265 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6566 ,0 ,0 ,0 ,0 ,0 ,28 ,0 ,240 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,128 ,0 ,54186 ,0 ,0 ,0 ,20 ,283 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,592 ,203 ,7756 ,0 ,0 ,0 ,26 ,0 ,16 ,0 ,0 ,4642 ,0 ,0 ,0 ,0 ,0 ,0 ,4789 ,0 ,0 ,0 ,2357 ,23 ,7027 ,2 ,11 ,47 ,0 ,0 ,0 ,0 ,0 ,3625 ,10688 ,0 ,0 ,0 ,0 ,38853 ,0 
+GM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1532 ,0 ,3071 ,0 ,0 ,2698 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,1538 ,273 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1552 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,110403 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,34639 ,0 ,251 ,0 ,0 ,57 ,99224 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,3463 ,0 ,0 ,0 ,0 ,35 ,8 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,35 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,11578 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,64324 ,0 ,0 ,0 ,0 ,0 ,2613 ,0 ,29334 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,31 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,2 ,0 ,0 ,0 ,1142 ,2060 ,0 ,0 ,0 ,0 ,0 ,0 
+GE,0 ,0 ,6 ,844 ,1 ,23506 ,1537 ,0 ,0 ,0 ,0 ,0 ,0 ,17473 ,5312 ,0 ,813 ,0 ,0 ,21 ,59 ,5474 ,0 ,0 ,0 ,594 ,0 ,0 ,0 ,0 ,0 ,3 ,178 ,2526 ,213 ,1 ,0 ,64 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,81 ,0 ,3 ,3431 ,2 ,0 ,100 ,0 ,1 ,0 ,0 ,22659 ,4515 ,87 ,0 ,0 ,38206 ,0 ,17445 ,1 ,0 ,0 ,1 ,7 ,150 ,10527 ,0 ,0 ,74 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,4 ,15 ,0 ,0 ,0 ,101532 ,673 ,0 ,0 ,3 ,0 ,0 ,0 ,1155 ,0 ,0 ,0 ,151 ,3348 ,0 ,0 ,23 ,0 ,27 ,2196 ,4678 ,0 ,56 ,2952 ,3265 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,3539 ,0 ,1 ,18414 ,11 ,1 ,0 ,475 ,0 ,0 ,0 ,4 ,35 ,0 ,0 ,298 ,0 ,0 ,1 ,0 ,0 ,0 ,3878 ,617 ,3717 ,1 ,66 ,453 ,0 ,78 ,0 ,0 ,3475 ,0 ,0 ,121 ,0 ,3262 ,820 ,9441 ,0 ,4 ,0 ,0 ,0 ,1251 ,9104 ,7 ,6727 ,4827 ,49246 ,0 ,0 
+DE,0 ,0 ,26906 ,2 ,1 ,34858 ,240 ,0 ,17 ,23808 ,0 ,0 ,0 ,1458951 ,17 ,11908 ,2451 ,2524 ,0 ,57706 ,34 ,13230 ,44 ,0 ,0 ,14535 ,0 ,0 ,0 ,0 ,0 ,5757 ,17 ,6390 ,8 ,0 ,25 ,99 ,0 ,0 ,0 ,174664 ,0 ,0 ,0 ,0 ,0 ,0 ,2179 ,2302 ,0 ,1 ,0 ,0 ,153 ,0 ,184128 ,23 ,13 ,0 ,10745 ,100704 ,0 ,1127 ,3932 ,320 ,175455 ,6 ,4511 ,0 ,3 ,3076 ,9 ,20425 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,168 ,0 ,8 ,7190 ,3904 ,22216 ,404073 ,295695 ,0 ,0 ,23 ,0 ,5 ,9224 ,2732 ,280 ,3129 ,0 ,0 ,158129 ,0 ,302659 ,6654 ,0 ,0 ,15543 ,0 ,0 ,81322 ,113 ,2355 ,0 ,0 ,0 ,0 ,28 ,0 ,0 ,0 ,5328 ,0 ,3467 ,272515 ,20428 ,4524 ,0 ,0 ,0 ,0 ,955193 ,1034 ,3 ,0 ,0 ,640543 ,1184 ,0 ,0 ,0 ,66 ,16 ,1998 ,28933 ,0 ,3931 ,1 ,13822 ,47 ,386333 ,0 ,0 ,28057 ,0 ,0 ,3 ,0 ,0 ,1531 ,376 ,282953 ,0 ,0 ,7 ,0 ,35199 ,2379 ,1 ,314 ,0 ,2826017 ,0 ,0 
+GH,0 ,0 ,0 ,10 ,0 ,0 ,0 ,0 ,0 ,0 ,1908 ,118 ,7790 ,0 ,132323 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,140786 ,0 ,947559 ,4 ,0 ,31 ,0 ,0 ,10 ,0 ,14820 ,0 ,14 ,0 ,0 ,1455343 ,76802 ,508 ,15071 ,150312 ,0 ,0 ,0 ,0 ,5982 ,0 ,0 ,0 ,39 ,0 ,15612 ,0 ,79 ,0 ,0 ,0 ,0 ,2439 ,0 ,317 ,8 ,0 ,330427 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,31482 ,0 ,84061 ,0 ,7040 ,0 ,0 ,0 ,0 ,1535012 ,0 ,6804 ,0 ,0 ,0 ,167628 ,0 ,0 ,0 ,0 ,0 ,9934 ,41 ,356969 ,0 ,11 ,3423 ,0 ,8101 ,18240 ,1374 ,0 ,0 ,0 ,5371 ,0 ,0 ,0 ,15728 ,10447 ,0 ,415921 ,0 ,0 ,0 ,1 ,251083 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,326877 ,31 ,55069 ,0 ,0 ,0 ,186 ,0 ,305190 ,0 ,0 ,103341 ,20 ,0 ,0 ,0 ,0 ,0 ,6238 ,0 ,0 ,0 ,73681 ,0 ,179636 ,0 ,5977 ,45914 ,0 ,16 ,0 ,0 ,0 ,423 ,1408 ,0 ,0 ,0 ,0 ,466799 ,0 
+GR,0 ,0 ,1199 ,24021 ,501 ,14307 ,11537 ,0 ,1063 ,1908 ,1014 ,0 ,101 ,134327 ,9345 ,14 ,42 ,0 ,0 ,2478 ,0 ,3030 ,0 ,0 ,10693 ,973 ,0 ,0 ,0 ,0 ,0 ,2665 ,244 ,19427 ,10017 ,2376 ,0 ,3457 ,0 ,869 ,0 ,35 ,0 ,0 ,0 ,252367 ,39 ,0 ,1969 ,116 ,0 ,1562 ,0 ,4698 ,162 ,0 ,0 ,4063 ,996 ,0 ,0 ,98262 ,165 ,54825 ,4094 ,1063 ,41631 ,1002 ,1349 ,2224 ,626 ,77 ,0 ,23 ,0 ,0 ,0 ,0 ,0 ,10354 ,0 ,54218 ,4158 ,3174 ,3757 ,30 ,13079 ,111194 ,6456 ,0 ,0 ,3640 ,1445 ,30 ,1144 ,0 ,0 ,10 ,0 ,4097 ,42130 ,0 ,0 ,991 ,0 ,771018 ,4947 ,30520 ,0 ,12592 ,44444 ,5564 ,0 ,0 ,0 ,0 ,62 ,0 ,4644 ,0 ,2292 ,0 ,7 ,11236 ,81886 ,2303 ,0 ,774 ,0 ,0 ,6212 ,4 ,35769 ,0 ,0 ,5351 ,0 ,0 ,128 ,0 ,1852 ,626 ,165 ,756 ,28 ,6546 ,862 ,1593 ,0 ,1371 ,0 ,0 ,98253 ,0 ,159 ,9601 ,0 ,4 ,12383 ,16452 ,2045 ,0 ,0 ,0 ,0 ,3324 ,1193 ,5054 ,19743 ,9068 ,296845 ,0 ,0 
+GL,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+GD,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,648 ,0 ,84 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,23 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,788 ,1447 ,0 ,142 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,285 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,263 ,0 ,0 ,0 ,56 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,125 ,0 ,0 ,0 ,80 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,210 ,0 
+GP,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1897 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,68 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,71 ,26 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,441 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9037 ,0 ,0 ,0 ,134 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,760 ,0 ,0 ,0 ,0 ,310 ,0 
+GU,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6348 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+GT,0 ,207 ,0 ,0 ,973 ,7004 ,0 ,0 ,0 ,0 ,11973 ,0 ,86654 ,10 ,266061 ,0 ,0 ,0 ,0 ,21731 ,0 ,2460 ,0 ,0 ,0 ,3440 ,0 ,148 ,0 ,4327 ,0 ,6685 ,0 ,0 ,0 ,0 ,0 ,2540 ,0 ,11494 ,0 ,0 ,4591 ,2680 ,354650 ,951 ,0 ,0 ,33 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,18204 ,3037 ,0 ,0 ,2585 ,63 ,60 ,2374 ,760 ,0 ,9 ,2800 ,2177 ,0 ,0 ,0 ,0 ,0 ,512 ,0 ,0 ,0 ,0 ,0 ,0 ,5717 ,0 ,3134 ,0 ,0 ,865517 ,0 ,9481 ,0 ,25662 ,0 ,0 ,0 ,0 ,0 ,0 ,70349 ,6063 ,0 ,191518 ,0 ,0 ,1006 ,193 ,5094 ,5087 ,3018 ,1 ,1995 ,0 ,1204 ,0 ,0 ,0 ,7 ,12024 ,0 ,15160 ,0 ,0 ,0 ,22726 ,3603 ,8 ,0 ,0 ,0 ,0 ,1 ,0 ,10636 ,1 ,100656 ,0 ,0 ,0 ,36317 ,9 ,21334 ,0 ,0 ,15800 ,577 ,0 ,0 ,714 ,2 ,0 ,248810 ,0 ,0 ,0 ,12 ,13 ,0 ,1140 ,14804 ,8351 ,0 ,0 ,0 ,0 ,0 ,13020 ,19444 ,1 ,0 ,2758 ,398 ,10905 ,115 
+GN,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,4 ,40256 ,0 ,164 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10230 ,0 ,270267 ,0 ,0 ,28 ,0 ,0 ,0 ,0 ,26 ,0 ,42443 ,0 ,0 ,24623 ,13748 ,90420 ,43985 ,34 ,0 ,0 ,0 ,0 ,36 ,0 ,0 ,0 ,563727 ,0 ,47 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,124910 ,5 ,0 ,957788 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,115 ,0 ,573 ,0 ,1 ,0 ,0 ,0 ,0 ,645056 ,0 ,84350 ,0 ,274 ,1 ,169258 ,0 ,0 ,0 ,0 ,0 ,52 ,0 ,314586 ,0 ,14 ,0 ,0 ,0 ,25 ,1 ,7 ,0 ,0 ,1 ,0 ,0 ,0 ,83 ,29669 ,0 ,92730 ,0 ,0 ,0 ,12093 ,58701 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1950687 ,44 ,11131 ,0 ,0 ,0 ,8222 ,1973 ,42087 ,0 ,0 ,30 ,8 ,0 ,0 ,0 ,0 ,0 ,5877 ,0 ,0 ,0 ,56017 ,0 ,26309 ,0 ,1939 ,109 ,0 ,8264 ,0 ,0 ,0 ,26836 ,70489 ,0 ,0 ,0 ,13 ,20828 ,0 
+GW,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,597 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,234036 ,0 ,4924 ,0 ,0 ,4718 ,0 ,0 ,0 ,0 ,0 ,0 ,138 ,0 ,0 ,186 ,10789 ,70 ,4875 ,4174 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1095 ,0 ,2995 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,309 ,0 ,0 ,30970 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,687 ,0 ,0 ,0 ,0 ,6176 ,0 ,983 ,0 ,2 ,1 ,12820 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9552 ,0 ,0 ,0 ,0 ,1 ,1291 ,295 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,103 ,0 ,14097 ,0 ,0 ,0 ,48 ,5422 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,100300 ,12407 ,48 ,0 ,0 ,0 ,0 ,10 ,16544 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,246 ,0 ,0 ,0 ,289 ,0 ,10 ,0 ,16 ,0 ,0 ,27 ,0 ,0 ,0 ,3702 ,6472 ,0 ,0 ,0 ,0 ,80 ,0 
+GY,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,174 ,0 ,603 ,0 ,40 ,0 ,0 ,0 ,0 ,177 ,3 ,126 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,1298 ,0 ,0 ,0 ,83 ,0 ,0 ,0 ,306 ,0 ,266 ,0 ,0 ,1054 ,14977 ,521 ,0 ,99 ,0 ,165 ,0 ,0 ,261 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,291 ,0 ,569 ,0 ,0 ,273 ,0 ,589 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,212 ,0 ,0 ,0 ,0 ,2875 ,0 ,447 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,265 ,0 ,1 ,538 ,23 ,1182 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,498 ,0 ,2823 ,0 ,0 ,0 ,0 ,1 ,369 ,0 ,0 ,0 ,0 ,2 ,0 ,142522 ,1892 ,0 ,0 ,0 ,0 ,2 ,0 ,4 ,0 ,0 ,200 ,0 ,0 ,0 ,0 ,0 ,0 ,34171 ,0 ,5 ,0 ,532 ,0 ,255 ,0 ,110 ,456 ,0 ,391 ,0 ,0 ,0 ,1176 ,1425 ,0 ,0 ,31 ,0 ,58 ,0 
+HT,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,30610 ,0 ,55855 ,0 ,211690 ,0 ,0 ,0 ,0 ,230 ,0 ,2580 ,0 ,0 ,0 ,31 ,0 ,164 ,0 ,119670 ,2646 ,0 ,0 ,0 ,0 ,0 ,0 ,107 ,0 ,0 ,0 ,0 ,29963 ,9437 ,40952 ,1969 ,41528 ,0 ,3 ,0 ,0 ,72 ,0 ,0 ,0 ,0 ,0 ,10579 ,38 ,12 ,0 ,0 ,5494 ,0 ,0 ,0 ,0 ,0 ,0 ,16414 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1244 ,0 ,256 ,0 ,0 ,187234 ,0 ,29248 ,0 ,234 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,140 ,0 ,0 ,0 ,0 ,1707 ,14711 ,12 ,8 ,0 ,0 ,0 ,0 ,0 ,27248 ,0 ,578 ,0 ,38747 ,0 ,0 ,0 ,2842 ,0 ,56 ,0 ,0 ,0 ,0 ,0 ,0 ,56558 ,24291 ,0 ,0 ,0 ,0 ,15259 ,20655 ,22177 ,0 ,0 ,0 ,49 ,72 ,0 ,0 ,0 ,0 ,23681 ,0 ,0 ,0 ,20078 ,4164 ,0 ,0 ,467 ,158 ,0 ,0 ,0 ,0 ,0 ,7042 ,25301 ,0 ,0 ,0 ,0 ,10550 ,197 
+HM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+HN,0 ,204 ,0 ,0 ,7 ,93 ,0 ,0 ,0 ,0 ,331 ,0 ,10964 ,0 ,154693 ,111 ,0 ,0 ,0 ,139 ,0 ,2469 ,0 ,0 ,0 ,378 ,0 ,1451 ,0 ,3000 ,0 ,128 ,0 ,0 ,0 ,0 ,0 ,1056 ,0 ,319 ,0 ,0 ,4054 ,1610 ,319191 ,1799 ,0 ,0 ,587 ,0 ,0 ,643 ,0 ,0 ,0 ,0 ,0 ,5630 ,50 ,0 ,0 ,36 ,1483 ,0 ,0 ,7 ,0 ,0 ,0 ,153 ,0 ,0 ,0 ,0 ,0 ,231 ,0 ,0 ,0 ,0 ,0 ,0 ,950 ,0 ,131 ,0 ,0 ,359300 ,0 ,1577 ,0 ,5669 ,0 ,0 ,0 ,0 ,0 ,0 ,1209 ,39 ,0 ,203467 ,0 ,0 ,6 ,252 ,613 ,8995 ,16 ,0 ,0 ,0 ,1269 ,0 ,0 ,0 ,0 ,1855 ,0 ,7880 ,0 ,0 ,0 ,1862 ,28 ,1125 ,0 ,0 ,0 ,0 ,0 ,0 ,16414 ,799 ,187 ,0 ,0 ,0 ,1397 ,0 ,17726 ,0 ,0 ,713 ,4 ,0 ,0 ,3 ,0 ,0 ,60088 ,0 ,0 ,0 ,3191 ,18 ,0 ,25 ,3472 ,1241 ,0 ,0 ,0 ,0 ,0 ,5865 ,4726 ,0 ,0 ,1194 ,2282 ,0 ,155 
+HU,0 ,0 ,23379 ,347 ,3014 ,26318 ,5996 ,0 ,8 ,1182 ,0 ,0 ,0 ,262082 ,579 ,209 ,4617 ,33 ,0 ,580 ,768 ,2274 ,0 ,14598 ,14 ,1634 ,1 ,0 ,0 ,0 ,0 ,342 ,5133 ,3195 ,343 ,5 ,4 ,1670 ,0 ,0 ,0 ,9597 ,0 ,0 ,0 ,0 ,5 ,0 ,531 ,1212 ,0 ,35 ,0 ,44 ,5 ,0 ,1074 ,3131 ,794 ,0 ,2327 ,57144 ,0 ,82946 ,1458 ,0 ,20396 ,322 ,17921 ,0 ,406 ,373 ,576 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,80617 ,0 ,15 ,229 ,860 ,170 ,986385 ,79948 ,0 ,0 ,455 ,0 ,7944 ,64 ,12623 ,0 ,36 ,0 ,0 ,21089 ,0 ,829 ,24279 ,0 ,368 ,1739 ,29 ,0 ,10813 ,4299 ,2641 ,0 ,0 ,0 ,0 ,5412 ,0 ,0 ,0 ,7218 ,0 ,2999 ,10096 ,590 ,2317 ,0 ,399 ,0 ,0 ,311266 ,272 ,2962 ,0 ,0 ,24110 ,0 ,443 ,0 ,0 ,21420 ,0 ,13419 ,57338 ,554 ,457 ,0 ,879 ,0 ,12999 ,0 ,0 ,610782 ,0 ,0 ,62 ,0 ,0 ,3272 ,1934 ,49312 ,0 ,0 ,4678 ,0 ,12275 ,170 ,30 ,6278 ,3845 ,946115 ,0 ,0 
+IS,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,514 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+IN,0 ,0 ,0 ,8 ,1428921 ,280766 ,4793 ,504287 ,0 ,2 ,0 ,0 ,867285 ,597546 ,12333818 ,0 ,275 ,0 ,0 ,29 ,573 ,366707 ,0 ,0 ,0 ,33891 ,0 ,1081630 ,0 ,163664 ,796182 ,406851 ,221 ,3343 ,1 ,9691192 ,0 ,8077 ,0 ,60944 ,0 ,0 ,95731 ,2120448 ,454510 ,11587368 ,6 ,0 ,26511 ,0 ,58 ,705472 ,108 ,5510 ,1 ,0 ,2255402 ,1222329 ,339286 ,162652 ,0 ,132431 ,5910 ,134 ,219131 ,0 ,0 ,0 ,535022 ,5924078 ,0 ,0 ,0 ,0 ,613211 ,98618 ,0 ,0 ,0 ,0 ,0 ,0 ,293413 ,1231165 ,169863 ,190868 ,0 ,9122807 ,0 ,2457379 ,0 ,56214 ,0 ,9069319 ,0 ,0 ,0 ,2147 ,99938 ,2 ,10 ,18793 ,0 ,134881 ,497999 ,0 ,1351092 ,619248 ,136003 ,586105 ,36024 ,40198 ,129700 ,0 ,0 ,4522688 ,833823 ,103562 ,0 ,7 ,26525 ,0 ,0 ,2053560 ,2179170 ,511560 ,0 ,0 ,0 ,1 ,6825639 ,0 ,31335108 ,647 ,423230 ,14 ,0 ,82733 ,1432253 ,0 ,5221871 ,0 ,0 ,10787892 ,735992 ,289 ,0 ,0 ,0 ,5 ,4681397 ,822 ,312214 ,0 ,114184 ,65 ,1 ,620182 ,441327 ,660444 ,4 ,438247 ,1 ,0 ,0 ,1306444 ,2762226 ,0 ,27463 ,100738 ,28217904 ,601 ,0 
+ID,671 ,0 ,0 ,0 ,0 ,0 ,0 ,135562 ,0 ,0 ,45917 ,0 ,155152 ,0 ,196019 ,0 ,0 ,0 ,0 ,0 ,0 ,65631 ,0 ,0 ,0 ,39893 ,0 ,510800 ,0 ,683269 ,3468 ,0 ,0 ,0 ,0 ,0 ,0 ,306669 ,108870 ,1 ,540250 ,0 ,1573461 ,2729256 ,1260508 ,3048 ,0 ,0 ,41000 ,0 ,0 ,46520 ,0 ,0 ,0 ,0 ,0 ,99484 ,12689 ,7574 ,0 ,0 ,3 ,0 ,120645 ,0 ,108706 ,0 ,0 ,340305 ,0 ,0 ,0 ,0 ,0 ,5468 ,234821 ,162324 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,2885326 ,0 ,269113 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,226473 ,214487 ,0 ,14484104 ,0 ,208 ,0 ,0 ,181441 ,71343 ,11380 ,0 ,0 ,0 ,192024 ,0 ,0 ,0 ,3 ,19775 ,0 ,0 ,0 ,0 ,0 ,65301 ,2381 ,8069 ,3 ,0 ,0 ,0 ,0 ,0 ,10185309 ,77761 ,3455083 ,0 ,0 ,0 ,0 ,287 ,2 ,0 ,0 ,674385 ,7414 ,40610 ,0 ,0 ,0 ,0 ,411563 ,73691 ,0 ,0 ,72117 ,0 ,66 ,108171 ,210845 ,56552 ,0 ,165442 ,0 ,0 ,13769 ,49659 ,65241 ,0 ,0 ,25513 ,0 ,27 ,0 
+IR,0 ,0 ,283954 ,76631 ,6783 ,112869 ,56626 ,0 ,946 ,834 ,0 ,0 ,3946 ,2033809 ,83187 ,0 ,6140 ,0 ,0 ,6680 ,0 ,7162 ,0 ,0 ,0 ,11560 ,0 ,0 ,0 ,0 ,1 ,1715 ,14 ,23938 ,12 ,515011 ,0 ,6126 ,0 ,23640 ,0 ,0 ,0 ,0 ,0 ,55759 ,0 ,16 ,41202 ,5 ,154192 ,18196 ,0 ,15785 ,0 ,0 ,203916 ,134783 ,5057 ,0 ,0 ,159892 ,3673 ,0 ,7676 ,697 ,0 ,1 ,2573 ,2292 ,23436 ,0 ,115 ,0 ,0 ,0 ,0 ,0 ,0 ,8969 ,0 ,15 ,29156 ,131163 ,13359 ,34 ,0 ,205232 ,100 ,3880 ,0 ,58844 ,0 ,7308 ,1 ,2795 ,0 ,0 ,0 ,2194 ,14 ,0 ,0 ,577 ,1 ,39011 ,52317 ,61093 ,0 ,10 ,37659 ,5843 ,0 ,0 ,1714 ,0 ,1306 ,0 ,150125 ,0 ,19111 ,0 ,4 ,131361 ,24017 ,28398 ,0 ,8198 ,0 ,0 ,159028 ,15 ,422644 ,0 ,0 ,430 ,0 ,3370 ,41687 ,0 ,2 ,0 ,24636 ,59223 ,2 ,4582 ,17810 ,4177 ,0 ,92631 ,89035 ,0 ,60784 ,0 ,0 ,19529 ,0 ,15271 ,9695 ,127901 ,0 ,24976 ,0 ,0 ,0 ,75853 ,65206 ,16 ,59401 ,99260 ,7510210 ,0 ,0 
+IQ,0 ,0 ,1534 ,354 ,150 ,15333 ,3866 ,0 ,3 ,3 ,0 ,0 ,14 ,1096280 ,772 ,0 ,98 ,0 ,0 ,154 ,0 ,599 ,0 ,0 ,0 ,204 ,0 ,0 ,0 ,0 ,0 ,571 ,0 ,118 ,1 ,54 ,0 ,2655 ,0 ,28 ,0 ,0 ,0 ,0 ,0 ,17809 ,47 ,0 ,13553 ,0 ,166090 ,6462 ,0 ,896 ,0 ,0 ,1013 ,8944 ,404 ,0 ,0 ,14762 ,29 ,15 ,389 ,5 ,0 ,1416 ,5 ,1661 ,59 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,12 ,2228 ,7 ,1972 ,185 ,0 ,101996 ,2 ,6 ,0 ,8312 ,0 ,2280 ,0 ,0 ,0 ,0 ,0 ,378 ,0 ,0 ,0 ,0 ,5686 ,842 ,3689 ,53933 ,0 ,0 ,528 ,1435 ,0 ,0 ,0 ,0 ,7 ,0 ,10 ,0 ,1460 ,0 ,2 ,24067 ,2504 ,2723 ,0 ,223 ,0 ,0 ,455 ,0 ,97541 ,0 ,0 ,0 ,0 ,4 ,3533 ,0 ,4499 ,0 ,38 ,40 ,2 ,283 ,162 ,13 ,2403 ,5069 ,731 ,0 ,844 ,0 ,0 ,320 ,0 ,154 ,2583 ,18591 ,0 ,0 ,0 ,0 ,0 ,379 ,20009 ,813 ,889 ,9692 ,2063826 ,0 ,0 
+IE,0 ,0 ,0 ,0 ,0 ,686 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,180838 ,2648 ,5668 ,17 ,0 ,0 ,12124 ,0 ,961 ,1063 ,0 ,0 ,803 ,0 ,0 ,0 ,0 ,0 ,871 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,28 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,738 ,0 ,0 ,0 ,0 ,0 ,0 ,196 ,0 ,0 ,0 ,1678 ,0 ,0 ,0 ,0 ,27 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,237 ,30 ,0 ,96946 ,10 ,0 ,0 ,0 ,0 ,0 ,0 ,35442 ,0 ,0 ,0 ,0 ,7362 ,0 ,0 ,0 ,0 ,0 ,277 ,0 ,0 ,800 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7943 ,9 ,0 ,0 ,0 ,0 ,0 ,9267 ,24 ,6 ,0 ,0 ,242 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,233 ,0 ,0 ,0 ,209 ,0 ,748 ,0 ,0 ,63 ,0 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,0 ,0 ,2892 ,0 ,1957 ,4927 ,0 ,0 ,0 ,31666 ,0 ,0 
+IM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+IL,0 ,0 ,15 ,601 ,68 ,2538 ,546 ,0 ,428 ,10 ,9805 ,0 ,2920 ,6809 ,1 ,0 ,542 ,0 ,0 ,97 ,0 ,2778 ,0 ,0 ,1467 ,2160 ,0 ,0 ,0 ,0 ,0 ,2633 ,17 ,435 ,0 ,2151 ,0 ,2073 ,0 ,2686 ,0 ,2246 ,0 ,0 ,0 ,7462 ,7 ,0 ,939 ,0 ,4369 ,1033 ,0 ,140 ,0 ,0 ,0 ,2486 ,457 ,0 ,0 ,7523 ,1774 ,0 ,807 ,111 ,2626 ,266 ,44 ,2440 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,225 ,0 ,0 ,2171 ,112 ,2560 ,0 ,2 ,3781 ,0 ,1855 ,0 ,1486 ,0 ,1 ,0 ,6502 ,0 ,0 ,0 ,31 ,865 ,0 ,0 ,3420 ,490 ,29085 ,3162 ,3668 ,225 ,1409 ,3208 ,1024 ,0 ,0 ,893 ,0 ,0 ,13 ,0 ,0 ,1273 ,0 ,1047 ,14242 ,159 ,364 ,0 ,144 ,0 ,0 ,0 ,0 ,0 ,58 ,0 ,0 ,0 ,2 ,28 ,0 ,2068 ,0 ,0 ,2 ,105 ,127 ,0 ,452 ,0 ,3 ,0 ,0 ,1333 ,0 ,2189 ,7501 ,2 ,0 ,13 ,4405 ,0 ,2000 ,0 ,0 ,0 ,2251 ,60259 ,517 ,14 ,3747 ,50949 ,0 ,0 
+IT,0 ,0 ,166457 ,53149 ,0 ,54992 ,17690 ,0 ,38293 ,7340 ,0 ,0 ,13 ,264427 ,6434 ,231 ,214 ,1036 ,0 ,66970 ,4 ,21438 ,4 ,0 ,12072 ,10772 ,1 ,0 ,0 ,0 ,0 ,15652 ,32492 ,28860 ,35898 ,6038 ,0 ,10069 ,0 ,1571 ,0 ,13867 ,0 ,0 ,0 ,0 ,0 ,0 ,2101 ,191 ,0 ,9536 ,0 ,2117 ,520 ,0 ,140275 ,10728 ,3288 ,0 ,1 ,676615 ,295 ,137316 ,17984 ,10567 ,92232 ,1 ,16023 ,0 ,79656 ,588 ,1 ,38 ,0 ,0 ,0 ,0 ,0 ,24615 ,0 ,135134 ,24944 ,2055 ,32363 ,2686 ,570 ,577870 ,131965 ,0 ,0 ,23684 ,0 ,0 ,39 ,145699 ,0 ,0 ,0 ,3766 ,93170 ,0 ,80 ,50 ,0 ,1080113 ,12816 ,84224 ,0 ,20758 ,59160 ,26867 ,0 ,0 ,2441 ,0 ,1 ,0 ,3267 ,0 ,11874 ,0 ,5 ,46061 ,17971 ,19943 ,0 ,32 ,0 ,0 ,11274 ,350 ,227369 ,0 ,0 ,3349 ,91 ,0 ,16 ,0 ,52665 ,6441 ,1306 ,245947 ,0 ,6142 ,450 ,4653 ,5 ,27184 ,0 ,0 ,123226 ,0 ,436 ,34123 ,0 ,0 ,13418 ,99652 ,11118 ,0 ,0 ,977 ,0 ,101804 ,160428 ,6043 ,4888 ,13457 ,1626891 ,0 ,0 
+JM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,383 ,0 ,7851 ,0 ,115 ,0 ,0 ,0 ,0 ,201 ,0 ,2049 ,0 ,0 ,0 ,1711 ,0 ,0 ,0 ,1469 ,0 ,172 ,0 ,0 ,0 ,0 ,0 ,1265 ,0 ,0 ,0 ,0 ,1018 ,14796 ,10174 ,0 ,283 ,0 ,1103 ,0 ,0 ,31 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,264 ,0 ,0 ,1776 ,0 ,0 ,0 ,53 ,636 ,0 ,1727 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1644 ,0 ,1020 ,0 ,0 ,1812 ,0 ,527 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,139 ,7030 ,495 ,838 ,0 ,0 ,0 ,0 ,0 ,448 ,1675 ,2109 ,0 ,2277 ,0 ,0 ,0 ,978 ,0 ,3047 ,0 ,0 ,0 ,0 ,0 ,0 ,10 ,1438 ,0 ,0 ,0 ,0 ,0 ,587 ,0 ,0 ,0 ,0 ,162 ,976 ,0 ,0 ,576 ,0 ,11770 ,0 ,0 ,0 ,2890 ,1124 ,0 ,0 ,780 ,1378 ,0 ,2615 ,0 ,0 ,0 ,1272 ,1910 ,0 ,0 ,690 ,0 ,9578 ,0 
+JP,0 ,0 ,0 ,0 ,0 ,35112 ,0 ,0 ,0 ,5107 ,0 ,0 ,5 ,62784 ,34237 ,0 ,0 ,0 ,0 ,96 ,65273 ,34413 ,0 ,0 ,0 ,17358 ,0 ,0 ,0 ,0 ,0 ,17415 ,0 ,4277 ,17576 ,0 ,0 ,3176 ,0 ,2939 ,0 ,0 ,0 ,0 ,0 ,0 ,9 ,0 ,10213 ,0 ,0 ,8531 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,16535 ,0 ,114765 ,7822 ,0 ,23060 ,24451 ,3676 ,6109 ,0 ,0 ,0 ,326 ,0 ,0 ,0 ,0 ,0 ,1792 ,0 ,5827 ,0 ,0 ,21105 ,0 ,0 ,61 ,68722 ,0 ,0 ,6550 ,0 ,295 ,0 ,140947 ,0 ,0 ,0 ,0 ,172 ,0 ,0 ,0 ,0 ,0 ,25446 ,2489 ,0 ,454 ,9297 ,12231 ,0 ,0 ,18607 ,0 ,0 ,321 ,0 ,0 ,2938 ,0 ,0 ,72447 ,0 ,15874 ,0 ,0 ,0 ,0 ,1789 ,0 ,1437813 ,3563 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,21228 ,0 ,140632 ,0 ,19615 ,1077 ,5104 ,0 ,55870 ,19327 ,0 ,0 ,0 ,32932 ,35822 ,10811 ,39036 ,6039 ,11418 ,0 ,0 ,0 ,801 ,0 ,76301 ,121929 ,0 ,0 ,9618 ,210991 ,7414 ,0 
+JO,0 ,0 ,16 ,367 ,36 ,953 ,1768 ,0 ,6 ,1 ,58 ,0 ,814 ,38514 ,1 ,0 ,11 ,0 ,0 ,39 ,0 ,621 ,0 ,0 ,29 ,503 ,0 ,0 ,0 ,0 ,0 ,1338 ,1 ,120 ,0 ,746 ,0 ,2257 ,0 ,74 ,0 ,1305 ,0 ,0 ,0 ,172 ,0 ,0 ,1931 ,0 ,2751 ,1477 ,0 ,135 ,0 ,0 ,1725 ,1477 ,118 ,0 ,0 ,2962 ,442 ,23 ,520 ,1045 ,14 ,363 ,306 ,53 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,5 ,1843 ,40 ,961 ,0 ,0 ,784 ,2 ,16 ,0 ,1281 ,0 ,13 ,0 ,253 ,0 ,0 ,0 ,8 ,17 ,0 ,0 ,36 ,1070 ,51368 ,1702 ,2768 ,0 ,6 ,3121 ,264 ,0 ,0 ,44 ,0 ,0 ,1 ,146 ,0 ,367 ,0 ,41 ,4918 ,3 ,2064 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,10 ,0 ,66 ,0 ,0 ,0 ,5 ,92 ,0 ,117 ,0 ,11 ,0 ,0 ,73 ,0 ,39 ,1294 ,0 ,0 ,80 ,8476 ,0 ,223 ,0 ,0 ,0 ,1818 ,4070 ,148 ,0 ,1835 ,11100 ,0 ,0 
+KZ,0 ,0 ,0 ,84 ,14 ,35715 ,4117 ,15 ,15 ,13 ,0 ,0 ,0 ,2351573 ,41841 ,0 ,1186 ,0 ,0 ,88 ,54166 ,20844 ,0 ,0 ,0 ,20600 ,0 ,1 ,0 ,73 ,80 ,57 ,216491 ,648 ,36 ,10896 ,0 ,9051 ,11 ,49 ,0 ,0 ,0 ,7 ,2 ,126455 ,0 ,0 ,21622 ,11 ,0 ,4762 ,0 ,0 ,39 ,0 ,2595 ,1255 ,1737 ,6 ,1 ,14192 ,12 ,0 ,1158 ,527 ,0 ,84 ,334 ,22 ,8 ,10 ,4 ,3 ,2 ,23 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,34492 ,4 ,882884 ,21 ,153864 ,100310 ,1 ,0 ,39664 ,8 ,47455 ,0 ,525525 ,0 ,16363 ,0 ,352 ,223901 ,14 ,0 ,9170 ,0 ,0 ,33465 ,85 ,0 ,94116 ,823 ,2064 ,4 ,0 ,2 ,0 ,44 ,0 ,5 ,0 ,1842 ,0 ,0 ,192466 ,57 ,4 ,0 ,121 ,0 ,31 ,118113 ,6 ,101344 ,0 ,129 ,24408 ,0 ,285005 ,24 ,2 ,4065 ,0 ,33 ,110732 ,6 ,7 ,0 ,895 ,0 ,14067 ,0 ,0 ,749099 ,0 ,60 ,284 ,27 ,273 ,355 ,29498 ,10 ,2 ,41 ,0 ,0 ,8273 ,16282 ,287 ,838 ,48871 ,12129681 ,0 ,0 
+KE,0 ,0 ,0 ,0 ,211 ,57 ,0 ,0 ,0 ,37 ,22677 ,0 ,71979 ,11110 ,1057317 ,0 ,215 ,0 ,0 ,39 ,0 ,29190 ,0 ,0 ,0 ,5393 ,0 ,20471 ,0 ,61674 ,13876 ,90 ,54 ,0 ,0 ,4080 ,0 ,296 ,0 ,13307 ,2062 ,0 ,22 ,84235 ,120619 ,14211 ,239251 ,0 ,469 ,0 ,461 ,8 ,234 ,0 ,0 ,0 ,88 ,10180 ,243 ,76 ,0 ,3 ,203 ,0 ,4008 ,0 ,4 ,2 ,9007 ,15632 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,3864 ,1978 ,40 ,972 ,0 ,2064970 ,0 ,61834 ,0 ,1 ,0 ,117876 ,0 ,0 ,0 ,2 ,89 ,3987 ,3970 ,2 ,0 ,93851 ,1706 ,0 ,10639 ,12039 ,7813 ,79 ,17 ,148 ,311 ,0 ,0 ,133722 ,4606 ,9858 ,0 ,2549 ,90 ,0 ,0 ,176354 ,190227 ,3 ,2743 ,0 ,0 ,0 ,0 ,0 ,28186 ,2373 ,0 ,0 ,0 ,81 ,27467 ,24696 ,204463 ,0 ,0 ,2391 ,922 ,9082 ,0 ,55 ,0 ,0 ,89129 ,0 ,5185 ,0 ,48268 ,1237 ,0 ,267562 ,15591 ,34345 ,0 ,3882 ,0 ,0 ,20 ,47729 ,88832 ,205 ,0 ,14931 ,132462 ,1045 ,0 
+KI,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+KW,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,692 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,87 ,0 ,0 ,0 ,16 ,0 ,0 ,0 ,0 ,0 ,88 ,0 ,0 ,0 ,0 ,0 ,126 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,352 ,0 ,1728 ,221 ,0 ,0 ,0 ,0 ,172 ,135 ,10 ,0 ,0 ,9 ,0 ,0 ,55 ,10 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,118 ,0 ,0 ,893 ,0 ,0 ,0 ,37 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,174 ,28 ,118 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,874 ,0 ,247 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,20 ,11 ,0 ,12 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,435 ,0 ,0 ,0 ,0 ,0 ,136 ,1016 ,0 ,0 ,10 ,11 ,0 ,0 
+KG,0 ,0 ,0 ,613 ,0 ,27198 ,8056 ,0 ,0 ,1 ,0 ,0 ,0 ,182897 ,51560 ,0 ,809 ,0 ,0 ,16 ,11 ,5611 ,0 ,0 ,0 ,7582 ,0 ,11 ,0 ,3 ,3 ,283 ,45 ,1144 ,1 ,71 ,0 ,611 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,21652 ,0 ,0 ,6206 ,19 ,0 ,264 ,0 ,0 ,1 ,0 ,39249 ,1111 ,3907 ,0 ,10 ,5022 ,0 ,42 ,1716 ,23 ,0 ,0 ,66 ,198 ,5733 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,38 ,0 ,0 ,2 ,2 ,123 ,38 ,0 ,91439 ,14229 ,0 ,0 ,1 ,0 ,161 ,0 ,53389 ,0 ,25 ,0 ,1414 ,1063 ,0 ,0 ,75 ,0 ,0 ,9037 ,3 ,0 ,122 ,2320 ,2462 ,176 ,0 ,0 ,0 ,18 ,0 ,494 ,0 ,1927 ,0 ,0 ,76667 ,53371 ,289 ,0 ,296 ,0 ,1 ,104 ,612 ,11331 ,0 ,5 ,345 ,0 ,10421 ,32 ,0 ,11 ,0 ,1 ,956 ,119 ,1 ,0 ,401 ,0 ,8297 ,0 ,0 ,9442 ,0 ,1 ,11 ,1 ,11 ,445 ,11175 ,68 ,0 ,1 ,0 ,0 ,4418 ,6503 ,0 ,1232 ,9485 ,205715 ,0 ,0 
+LA,0 ,0 ,0 ,1 ,4 ,111 ,1 ,20 ,0 ,30 ,0 ,0 ,23123 ,15 ,2914 ,0 ,3 ,0 ,0 ,16 ,14 ,59 ,0 ,12 ,0 ,11 ,0 ,68 ,0 ,75148 ,41 ,12 ,20 ,0 ,12 ,21 ,0 ,7605 ,8 ,8 ,0 ,0 ,0 ,15 ,78937 ,1722 ,18 ,0 ,53 ,0 ,0 ,30 ,3 ,0 ,11 ,0 ,270 ,7346 ,34 ,9 ,0 ,8 ,1318 ,36 ,17 ,0 ,17 ,0 ,7 ,16975 ,1 ,57 ,1 ,1 ,14 ,17 ,77 ,77 ,0 ,0 ,0 ,0 ,968 ,2 ,11 ,58 ,0 ,198106 ,0 ,499 ,0 ,1458 ,3 ,95 ,0 ,0 ,0 ,13 ,8083 ,15 ,5 ,109 ,0 ,0 ,0 ,0 ,62 ,4830 ,745 ,21 ,37 ,102 ,11 ,0 ,34 ,38 ,1999 ,4134 ,2 ,10 ,89 ,0 ,0 ,169 ,3397 ,18 ,0 ,1 ,0 ,624 ,58 ,0 ,791274 ,19034 ,1037 ,7 ,0 ,2 ,7848 ,1 ,47 ,0 ,0 ,8251 ,3 ,17 ,1623 ,0 ,0 ,0 ,21779 ,5 ,633 ,0 ,6190 ,3942 ,2895 ,5283 ,6189 ,34 ,2 ,137 ,15 ,0 ,0 ,43707 ,147415 ,0 ,20 ,6169 ,12 ,36 ,0 
+LV,0 ,0 ,0 ,0 ,0 ,3672 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,84293 ,1526 ,0 ,980 ,360 ,0 ,26561 ,5284 ,665 ,0 ,0 ,0 ,447 ,0 ,0 ,0 ,0 ,0 ,78 ,14394 ,287 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1661 ,115 ,1181 ,0 ,0 ,0 ,0 ,100 ,0 ,52 ,11 ,467 ,0 ,6 ,0 ,0 ,105 ,0 ,0 ,0 ,0 ,98 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,100 ,100 ,80531 ,1159 ,0 ,0 ,0 ,0 ,21 ,6701 ,46791 ,0 ,4 ,0 ,1 ,86868 ,0 ,0 ,700 ,0 ,0 ,525 ,0 ,0 ,12899 ,0 ,199 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,112 ,0 ,0 ,8184 ,400 ,0 ,0 ,37 ,0 ,0 ,143907 ,158 ,0 ,0 ,0 ,36579 ,0 ,0 ,0 ,0 ,0 ,0 ,13 ,86 ,0 ,0 ,0 ,418 ,0 ,1232 ,0 ,0 ,4002 ,0 ,0 ,0 ,0 ,0 ,2 ,648 ,5667 ,0 ,0 ,0 ,0 ,1913 ,8268 ,773 ,9 ,0 ,504372 ,0 ,0 
+LB,0 ,0 ,625 ,4702 ,50 ,14267 ,3796 ,0 ,92 ,0 ,1457 ,0 ,2033 ,13944 ,1081 ,0 ,6 ,0 ,0 ,365 ,0 ,1503 ,0 ,0 ,379 ,397 ,0 ,0 ,0 ,0 ,0 ,789 ,0 ,4339 ,0 ,2975 ,0 ,583 ,0 ,17 ,0 ,51 ,0 ,0 ,0 ,82 ,0 ,0 ,3679 ,0 ,14 ,1286 ,0 ,630 ,0 ,0 ,2 ,5606 ,289 ,0 ,0 ,7082 ,625 ,55 ,2025 ,1159 ,8 ,7 ,1492 ,2074 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,13 ,3498 ,1173 ,753 ,0 ,49 ,994 ,5 ,9 ,0 ,1327 ,0 ,0 ,0 ,205 ,0 ,0 ,0 ,291 ,139 ,0 ,0 ,21 ,425 ,58402 ,1833 ,5711 ,0 ,792 ,3277 ,2640 ,0 ,0 ,25 ,0 ,0 ,1 ,26 ,0 ,3230 ,0 ,23 ,22116 ,189 ,1286 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,58 ,0 ,138 ,0 ,0 ,5 ,469 ,459 ,0 ,285 ,0 ,200 ,1 ,0 ,30 ,0 ,1 ,1061 ,45 ,0 ,7760 ,5861 ,0 ,18 ,0 ,0 ,0 ,1881 ,2926 ,314 ,1986 ,1212 ,40583 ,0 ,0 
+LS,0 ,0 ,53 ,0 ,0 ,8 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,1642 ,10429 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,2 ,0 ,18 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,3 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,3004 ,0 ,0 ,0 ,2 ,3 ,0 ,2 ,0 ,8 ,0 ,1 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,1 ,0 ,4 ,18374 ,0 ,0 ,0 ,1 ,0 ,5 ,0 ,245 ,0 ,0 ,0 ,1 ,252 ,0 ,0 ,1 ,0 ,0 ,5 ,5 ,1 ,1416 ,3 ,4 ,0 ,0 ,0 ,0 ,2 ,2 ,0 ,0 ,1 ,0 ,0 ,6981 ,0 ,5 ,0 ,0 ,0 ,0 ,35 ,0 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,1 ,22373 ,0 ,0 ,119 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,278 ,0 ,3 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2423 ,3384 ,0 ,0 ,1 ,7719 ,0 ,0 
+LR,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,12608 ,0 ,133 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,237 ,0 ,78281 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,11 ,0 ,158 ,0 ,0 ,86619 ,2475 ,2871 ,593 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,0 ,0 ,0 ,0 ,17 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6479 ,2 ,0 ,7846 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,45 ,0 ,251 ,0 ,0 ,0 ,0 ,0 ,0 ,5683 ,0 ,183 ,0 ,1 ,0 ,1181 ,0 ,0 ,0 ,0 ,0 ,2903 ,0 ,18295 ,0 ,6 ,0 ,0 ,0 ,2114 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,31 ,1563 ,0 ,22585 ,0 ,0 ,0 ,5 ,5217 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,241425 ,4 ,75681 ,0 ,0 ,0 ,16 ,4 ,360 ,0 ,0 ,7913 ,3 ,0 ,0 ,0 ,0 ,0 ,26787 ,0 ,0 ,0 ,2166 ,0 ,2976 ,0 ,25 ,249 ,0 ,579 ,0 ,0 ,0 ,5631 ,16825 ,0 ,0 ,0 ,0 ,2502 ,0 
+LY,0 ,0 ,0 ,56216 ,0 ,418 ,4555 ,0 ,0 ,0 ,0 ,0 ,0 ,136637 ,340 ,0 ,0 ,0 ,0 ,187 ,0 ,310 ,0 ,0 ,0 ,7964 ,0 ,0 ,0 ,0 ,0 ,878 ,0 ,0 ,0 ,209 ,0 ,1831 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,445 ,0 ,31208 ,152 ,0 ,2971 ,0 ,0 ,10811 ,801 ,805 ,0 ,0 ,8068 ,0 ,0 ,0 ,874 ,0 ,2023 ,1242 ,9369 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1985 ,0 ,0 ,0 ,0 ,1567 ,0 ,0 ,0 ,1730 ,0 ,4265 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,212533 ,9166 ,5245 ,0 ,3618 ,1757 ,298 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9628 ,0 ,0 ,17932 ,0 ,1828 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,984 ,0 ,0 ,606 ,10293 ,0 ,0 ,0 ,0 ,0 ,4471 ,5829 ,0 ,0 ,17323 ,154076 ,0 ,0 
+LT,0 ,0 ,0 ,0 ,0 ,21462 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,132418 ,2843 ,0 ,122 ,820 ,0 ,1678 ,13684 ,4458 ,0 ,0 ,0 ,3230 ,0 ,0 ,0 ,0 ,0 ,278 ,1861 ,34 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,142 ,1360 ,177 ,0 ,155 ,0 ,0 ,8693 ,0 ,177 ,3609 ,253 ,0 ,212 ,1 ,0 ,34143 ,0 ,0 ,0 ,0 ,277 ,0 ,8 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,88 ,0 ,0 ,0 ,3912 ,2737 ,16118 ,10041 ,0 ,0 ,0 ,0 ,80 ,11437 ,56591 ,0 ,992 ,0 ,7 ,18542 ,0 ,0 ,42 ,0 ,0 ,2348 ,0 ,0 ,35197 ,0 ,1279 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1068 ,0 ,0 ,10860 ,5110 ,0 ,0 ,10 ,0 ,0 ,213849 ,17 ,0 ,0 ,0 ,28539 ,0 ,0 ,0 ,0 ,0 ,0 ,153 ,459 ,0 ,0 ,1 ,805 ,0 ,17022 ,0 ,0 ,6659 ,0 ,0 ,0 ,0 ,0 ,8 ,869 ,8650 ,0 ,0 ,0 ,0 ,7294 ,13699 ,9435 ,41 ,2 ,136853 ,0 ,0 
+LU,0 ,0 ,251 ,0 ,0 ,467 ,5 ,0 ,3 ,14 ,0 ,0 ,0 ,6694 ,56 ,67 ,0 ,0 ,0 ,40 ,5 ,20 ,9 ,0 ,0 ,26 ,0 ,0 ,0 ,0 ,0 ,23 ,0 ,71 ,2 ,0 ,67 ,2 ,0 ,0 ,0 ,249 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,14 ,0 ,0 ,0 ,0 ,6 ,0 ,2861 ,0 ,1 ,0 ,8 ,1240 ,0 ,138 ,29 ,0 ,2995 ,1 ,54 ,0 ,1 ,0 ,2 ,14 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,10 ,0 ,2 ,24 ,143 ,2 ,147 ,3020 ,0 ,0 ,5 ,0 ,0 ,218 ,274 ,0 ,2 ,0 ,0 ,52 ,0 ,571 ,0 ,0 ,0 ,14 ,0 ,0 ,290 ,11 ,65 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,202 ,0 ,6 ,627 ,50 ,3 ,0 ,1 ,0 ,0 ,2699 ,4 ,0 ,0 ,0 ,875 ,189 ,0 ,0 ,0 ,18 ,3 ,7 ,2 ,0 ,13 ,0 ,12 ,10 ,159 ,0 ,0 ,123 ,0 ,0 ,1 ,0 ,0 ,10 ,6 ,107 ,0 ,0 ,0 ,0 ,137 ,2974 ,0 ,29 ,0 ,4781 ,0 ,0 
+MG,0 ,0 ,0 ,0 ,27 ,4595 ,164 ,0 ,0 ,0 ,3359 ,0 ,68194 ,0 ,58197 ,0 ,0 ,0 ,0 ,0 ,0 ,834 ,0 ,0 ,0 ,2540 ,0 ,15346 ,27138 ,331425 ,7686 ,29 ,0 ,0 ,0 ,0 ,0 ,0 ,2011 ,0 ,73285 ,0 ,13838 ,31156 ,77295 ,13268 ,23467 ,0 ,57 ,0 ,0 ,396 ,9592 ,0 ,0 ,0 ,0 ,1724 ,381 ,0 ,0 ,2525 ,1529 ,0 ,450 ,0 ,0 ,162 ,1227 ,77535 ,0 ,0 ,0 ,0 ,0 ,732 ,0 ,0 ,0 ,0 ,0 ,0 ,1287 ,1226 ,159 ,0 ,0 ,129088 ,0 ,47263 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,0 ,0 ,1807 ,0 ,0 ,0 ,0 ,1793 ,12954 ,0 ,14490 ,3689 ,969 ,7633 ,0 ,0 ,0 ,3192 ,14690 ,10949 ,0 ,468 ,0 ,0 ,41165 ,11609 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1644443 ,0 ,0 ,0 ,0 ,0 ,0 ,13933 ,2385 ,0 ,0 ,63 ,157 ,0 ,0 ,0 ,0 ,0 ,95257 ,0 ,0 ,0 ,132181 ,0 ,37336 ,1624 ,1538 ,4503 ,0 ,55926 ,4116 ,0 ,70118 ,33429 ,36731 ,0 ,0 ,0 ,445 ,33568 ,0 
+MW,0 ,0 ,0 ,0 ,135 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10848 ,1 ,301843 ,0 ,0 ,0 ,0 ,0 ,0 ,8945 ,0 ,0 ,0 ,0 ,0 ,59 ,0 ,240324 ,1 ,0 ,0 ,0 ,0 ,2069 ,0 ,0 ,0 ,437 ,0 ,0 ,94 ,1 ,4694 ,79007 ,97384 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,44955 ,86 ,0 ,0 ,23 ,2 ,0 ,0 ,0 ,0 ,0 ,581 ,390187 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,1377 ,2067 ,0 ,0 ,0 ,1464858 ,0 ,61062 ,0 ,0 ,0 ,56612 ,0 ,0 ,0 ,0 ,148 ,4641 ,0 ,14 ,0 ,110 ,0 ,0 ,8419 ,5451 ,3017 ,4829 ,0 ,0 ,435 ,0 ,0 ,214171 ,2136 ,4682 ,0 ,31036 ,0 ,0 ,0 ,47974 ,19454 ,8318 ,0 ,0 ,0 ,0 ,0 ,0 ,64838 ,1 ,0 ,0 ,0 ,0 ,5569 ,576 ,110503 ,0 ,0 ,158300 ,877 ,0 ,0 ,0 ,0 ,0 ,28307 ,0 ,16678 ,0 ,230044 ,6526 ,0 ,17901 ,94155 ,26642 ,0 ,3952 ,3876 ,0 ,76 ,11279 ,68054 ,0 ,0 ,0 ,551 ,27228 ,0 
+MY,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,60 ,0 ,21780 ,1 ,76 ,0 ,0 ,0 ,0 ,0 ,0 ,3102 ,0 ,2 ,0 ,28 ,0 ,7569 ,0 ,1787 ,15 ,1 ,2 ,0 ,0 ,0 ,0 ,2560 ,111 ,798 ,983 ,0 ,6311 ,75863 ,1739 ,1 ,0 ,0 ,4791 ,0 ,0 ,59 ,0 ,0 ,0 ,0 ,4 ,13997 ,20 ,867 ,0 ,0 ,871 ,0 ,39 ,0 ,127 ,0 ,0 ,74 ,0 ,0 ,0 ,0 ,0 ,12 ,394 ,394 ,0 ,0 ,0 ,0 ,1909 ,0 ,1422 ,0 ,0 ,9269 ,0 ,6571 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,15 ,134 ,0 ,5215995 ,0 ,154721 ,0 ,0 ,127 ,1206 ,2401 ,0 ,0 ,0 ,8224 ,0 ,0 ,0 ,1647 ,10416 ,0 ,0 ,0 ,0 ,0 ,0 ,9 ,1586 ,0 ,0 ,0 ,0 ,0 ,0 ,558768 ,653 ,954512 ,0 ,0 ,0 ,7 ,0 ,10 ,0 ,0 ,7 ,60 ,4473 ,0 ,0 ,0 ,0 ,1399 ,109 ,3 ,0 ,2956 ,4 ,1 ,1879 ,1281 ,1949 ,0 ,16718 ,0 ,0 ,12 ,17621 ,28807 ,0 ,0 ,8560 ,0 ,358 ,0 
+ML,0 ,0 ,0 ,28 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,38121 ,8258 ,3 ,13224 ,0 ,0 ,0 ,0 ,0 ,0 ,2689 ,0 ,0 ,0 ,553 ,0 ,29852 ,0 ,10297 ,0 ,0 ,346 ,0 ,0 ,0 ,0 ,7958 ,0 ,198 ,0 ,0 ,840 ,0 ,136 ,171149 ,398761 ,0 ,0 ,0 ,69 ,4431 ,0 ,0 ,0 ,63959 ,0 ,270 ,608 ,0 ,0 ,0 ,50 ,0 ,379 ,0 ,481 ,17671 ,0 ,464684 ,0 ,0 ,0 ,0 ,0 ,1780 ,0 ,0 ,63873 ,0 ,177 ,0 ,2002 ,0 ,3744 ,0 ,0 ,1169076 ,0 ,37472 ,0 ,2089 ,3402 ,2158346 ,0 ,0 ,0 ,0 ,0 ,1881 ,0 ,2 ,0 ,3 ,36004 ,0 ,3931 ,15640 ,1702 ,55 ,0 ,0 ,1 ,0 ,0 ,0 ,4716 ,114 ,0 ,116 ,0 ,0 ,0 ,9704 ,406 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,890875 ,2 ,132 ,0 ,0 ,0 ,60387 ,6 ,1806165 ,0 ,0 ,21998 ,39 ,0 ,0 ,0 ,0 ,534 ,4886 ,0 ,0 ,0 ,39250 ,2546 ,391 ,85 ,492 ,11806 ,0 ,50 ,0 ,0 ,0 ,39362 ,62090 ,0 ,0 ,0 ,6906 ,6094 ,0 
+MT,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,18 ,68 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,18 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,443 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,207 ,0 ,0 ,0 ,250 ,0 ,0 
+MQ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5656 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,84 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,419 ,17 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1305 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,605 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3611 ,0 ,0 ,0 ,22 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,167 ,0 
+MR,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,173 ,0 ,492 ,10973 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,2268 ,22377 ,0 ,0 ,0 ,8610 ,0 ,0 ,0 ,0 ,15 ,0 ,778 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,1032 ,0 ,0 ,0 ,0 ,0 ,18 ,0 ,0 ,302 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,21586 ,0 ,14 ,0 ,0 ,4356 ,11565 ,0 ,0 ,0 ,0 ,0 ,16 ,0 ,0 ,0 ,0 ,0 ,0 ,17 ,1 ,0 ,25736 ,0 ,0 ,0 ,0 ,0 ,0 ,52 ,0 ,0 ,0 ,0 ,0 ,0 ,374 ,32298 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,62179 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,198551 ,0 ,0 ,38 ,0 ,0 ,0 ,0 ,0 ,3 ,113 ,0 ,0 ,0 ,2834 ,0 ,0 ,0 ,0 ,19 ,0 ,0 ,0 ,0 ,0 ,901 ,898 ,0 ,0 ,3555 ,3732 ,457 ,0 
+MU,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,309 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,39 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,226 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,172 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,43 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,539 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,67 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,38784 ,0 ,0 ,0 ,25 ,0 ,0 ,668 ,141 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,898 ,0 ,0 ,0 ,0 ,0 ,0 
+YT,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+MX,0 ,15570 ,140490 ,34 ,6588 ,54803 ,204 ,0 ,265 ,30666 ,209416 ,0 ,71834 ,274293 ,1458975 ,0 ,8281 ,4555 ,0 ,23102 ,1 ,7222 ,0 ,2 ,84 ,12041 ,0 ,1565 ,0 ,2063 ,984 ,33587 ,0 ,48 ,0 ,59428 ,0 ,154165 ,0 ,65035 ,0 ,35 ,59933 ,110811 ,525456 ,142156 ,22 ,0 ,15735 ,0 ,2984 ,1715 ,0 ,1810 ,0 ,0 ,21726 ,70228 ,6805 ,0 ,0 ,33862 ,19663 ,288454 ,10352 ,8285 ,68278 ,9160 ,12969 ,58174 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,178390 ,5072 ,22174 ,8 ,0 ,6124204 ,141760 ,203642 ,0 ,18943 ,25 ,24 ,0 ,2458 ,0 ,0 ,510 ,64195 ,29562 ,113008 ,0 ,0 ,4209 ,8111 ,48321 ,302926 ,18864 ,1815 ,26152 ,3677 ,3694 ,0 ,14 ,0 ,2826 ,24663 ,261 ,679 ,16011 ,0 ,0 ,60387 ,601 ,33839 ,0 ,677 ,0 ,0 ,3062 ,7731 ,47330 ,7760 ,31341 ,9 ,15893 ,47003 ,76900 ,8942 ,1419502 ,91624 ,0 ,152185 ,566 ,2827 ,0 ,12956 ,12017 ,65 ,707650 ,0 ,6035 ,0 ,3742 ,34934 ,0 ,8 ,6721 ,81987 ,8551 ,42861 ,0 ,656 ,1051 ,46869 ,102816 ,8964 ,92519 ,38582 ,549929 ,7882 ,621 
+FM,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,93 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,229 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19 ,4086 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,139 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,134 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+MD,0 ,0 ,117 ,377 ,5 ,47997 ,3445 ,0 ,0 ,0 ,0 ,0 ,0 ,48512 ,15841 ,28 ,1 ,0 ,0 ,0 ,4 ,1934 ,0 ,0 ,0 ,2349 ,0 ,0 ,0 ,0 ,0 ,93 ,23 ,3888 ,0 ,761 ,0 ,1986 ,0 ,0 ,0 ,48 ,0 ,0 ,0 ,0 ,0 ,0 ,5669 ,525 ,0 ,693 ,0 ,0 ,17 ,0 ,76 ,299 ,3760 ,0 ,45 ,101076 ,0 ,112 ,380 ,0 ,650 ,0 ,1674 ,0 ,560 ,2 ,2 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,202 ,0 ,0 ,1 ,18 ,0 ,332085 ,28663 ,0 ,0 ,639 ,0 ,18 ,601 ,1176 ,0 ,29 ,0 ,163 ,1187 ,0 ,0 ,6 ,0 ,0 ,6612 ,0 ,0 ,9368 ,5766 ,2320 ,0 ,0 ,0 ,0 ,10 ,0 ,0 ,0 ,20187 ,0 ,1 ,22229 ,1 ,3740 ,0 ,909 ,0 ,0 ,24034 ,968 ,16 ,0 ,0 ,907 ,0 ,0 ,0 ,0 ,4586 ,0 ,3739 ,27926 ,0 ,0 ,0 ,1750 ,0 ,13400 ,0 ,0 ,298418 ,0 ,0 ,0 ,0 ,0 ,420 ,4780 ,0 ,0 ,0 ,0 ,0 ,4078 ,5381 ,124 ,17832 ,4872 ,300058 ,0 ,0 
+MN,0 ,0 ,0 ,0 ,1 ,3 ,0 ,2 ,0 ,2 ,0 ,0 ,0 ,3258 ,6 ,0 ,0 ,0 ,0 ,13 ,27 ,1336 ,0 ,0 ,0 ,3185 ,0 ,0 ,0 ,10 ,11 ,0 ,479 ,0 ,4 ,0 ,0 ,1 ,1 ,2 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,273 ,0 ,0 ,1 ,0 ,0 ,4 ,0 ,1713 ,935 ,1 ,0 ,0 ,27 ,1 ,3681 ,0 ,0 ,0 ,0 ,0 ,2 ,284 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,25 ,0 ,61 ,427 ,0 ,0 ,0 ,1 ,8 ,0 ,240 ,0 ,3 ,0 ,1371 ,8724 ,1 ,0 ,0 ,0 ,0 ,633 ,12 ,0 ,26 ,0 ,1 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,15776 ,1354 ,0 ,0 ,0 ,0 ,4 ,27269 ,0 ,22 ,0 ,19 ,7 ,0 ,0 ,1 ,0 ,4 ,0 ,0 ,2 ,0 ,1 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,10 ,43 ,3 ,41 ,0 ,3 ,2 ,0 ,5 ,0 ,0 ,2233 ,1840 ,6 ,7 ,5 ,179655 ,0 ,0 
+ME,0 ,0 ,340 ,2 ,0 ,297 ,253 ,0 ,0 ,0 ,0 ,0 ,0 ,398 ,52 ,758 ,0 ,0 ,0 ,2 ,0 ,355 ,0 ,0 ,0 ,749 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,723 ,43 ,6 ,40 ,212 ,0 ,0 ,0 ,3322 ,0 ,0 ,0 ,5 ,4 ,0 ,12 ,0 ,0 ,0 ,0 ,1207 ,0 ,0 ,0 ,190 ,258 ,0 ,0 ,2290 ,0 ,0 ,382 ,0 ,91 ,0 ,153 ,0 ,0 ,17 ,17 ,58 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,474 ,0 ,0 ,0 ,0 ,0 ,660 ,2124 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,42 ,221 ,0 ,0 ,0 ,0 ,183 ,72 ,793 ,0 ,515 ,76 ,60 ,0 ,0 ,0 ,0 ,422 ,0 ,0 ,0 ,319 ,0 ,80 ,1534 ,25 ,0 ,0 ,173 ,0 ,0 ,11 ,180 ,0 ,0 ,0 ,174 ,0 ,0 ,0 ,0 ,0 ,0 ,1929 ,16 ,7 ,0 ,0 ,736 ,0 ,25 ,0 ,0 ,16 ,0 ,0 ,0 ,0 ,124 ,116 ,99 ,0 ,0 ,0 ,0 ,0 ,534 ,1731 ,763 ,439 ,442 ,805 ,0 ,0 
+MA,0 ,0 ,14 ,199794 ,25154 ,49832 ,10725 ,0 ,2876 ,1 ,6102 ,0 ,8420 ,1293434 ,13 ,1 ,226 ,0 ,0 ,105074 ,0 ,2244 ,0 ,0 ,10329 ,22982 ,0 ,0 ,0 ,0 ,266 ,2451 ,3592 ,2891 ,0 ,54928 ,0 ,4266 ,0 ,1919 ,0 ,10 ,0 ,0 ,0 ,105 ,0 ,0 ,1283 ,0 ,59631 ,2436 ,0 ,61586 ,0 ,0 ,102328 ,7633 ,2293 ,0 ,0 ,39787 ,107 ,0 ,9153 ,9806 ,0 ,1876 ,14473 ,13776 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3116 ,40755 ,261 ,0 ,78031 ,69245 ,13 ,0 ,0 ,17046 ,0 ,2542 ,0 ,0 ,0 ,0 ,0 ,0 ,15459 ,0 ,0 ,230 ,0 ,939117 ,31551 ,58736 ,0 ,41447 ,13304 ,3740 ,0 ,2555 ,0 ,0 ,1245 ,0 ,0 ,0 ,15380 ,0 ,0 ,57672 ,28406 ,7151 ,0 ,3376 ,0 ,0 ,1923 ,0 ,5791 ,0 ,0 ,3651 ,214 ,0 ,893 ,4307 ,4662 ,0 ,0 ,744 ,5069 ,0 ,31 ,3162 ,5902 ,56207 ,11774 ,0 ,18910 ,0 ,849 ,64904 ,0 ,0 ,481 ,15086 ,0 ,68 ,0 ,0 ,0 ,21600 ,10710 ,3930 ,6831 ,16460 ,2847703 ,0 ,0 
+MZ,0 ,0 ,3 ,1 ,2 ,0 ,1 ,0 ,0 ,0 ,1 ,0 ,91545 ,1 ,870834 ,0 ,0 ,0 ,0 ,0 ,0 ,89 ,0 ,0 ,0 ,0 ,0 ,147840 ,0 ,807774 ,157715 ,0 ,3 ,0 ,0 ,1482 ,1 ,0 ,0 ,10 ,1 ,0 ,0 ,86489 ,880 ,129880 ,347148 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,28784 ,0 ,0 ,0 ,1 ,2450 ,0 ,1 ,0 ,5 ,0 ,0 ,346369 ,0 ,0 ,0 ,0 ,1 ,5831 ,0 ,0 ,0 ,0 ,0 ,0 ,971 ,59 ,0 ,0 ,2 ,2238052 ,0 ,4927 ,0 ,0 ,0 ,52616 ,0 ,85 ,0 ,0 ,5 ,65 ,4 ,0 ,0 ,119463 ,0 ,0 ,6598 ,3383 ,4292 ,357 ,1 ,0 ,46 ,0 ,0 ,9979 ,110 ,8049 ,0 ,1318 ,1 ,0 ,0 ,18324 ,318933 ,585 ,1 ,0 ,0 ,0 ,0 ,0 ,265629 ,1308 ,0 ,3 ,0 ,1 ,244554 ,2138 ,251056 ,0 ,0 ,33678 ,29 ,0 ,0 ,0 ,0 ,0 ,47091 ,0 ,12203 ,0 ,68640 ,102 ,0 ,43378 ,130295 ,18747 ,0 ,2846 ,103 ,0 ,2 ,19447 ,46869 ,0 ,0 ,1 ,12981 ,779 ,0 
+MM,0 ,0 ,0 ,4 ,44 ,734 ,7 ,66457 ,0 ,154 ,3 ,0 ,560 ,202 ,3225388 ,0 ,1 ,0 ,0 ,352 ,320 ,222 ,0 ,3 ,0 ,57 ,0 ,1360 ,0 ,32383 ,12342 ,50 ,19567 ,0 ,49 ,366947 ,0 ,89 ,16 ,29 ,0 ,0 ,0 ,47350 ,12491 ,178928 ,120094 ,0 ,206 ,0 ,2 ,179 ,107 ,0 ,46 ,0 ,1835 ,354723 ,27302 ,75 ,0 ,30 ,36 ,206163 ,53 ,1 ,5 ,2 ,63 ,1054854 ,3 ,45 ,5 ,3 ,226 ,5 ,21 ,21 ,0 ,0 ,0 ,0 ,45 ,1236 ,76 ,279 ,0 ,500933 ,0 ,1299 ,0 ,103 ,13 ,153805 ,0 ,0 ,1 ,42773 ,97 ,7 ,115 ,30916 ,0 ,0 ,0 ,0 ,68090 ,216 ,7 ,47225 ,224 ,654 ,5 ,0 ,203 ,438264 ,78058 ,179 ,6 ,98221 ,561 ,0 ,0 ,31558 ,468 ,101 ,0 ,4 ,0 ,53 ,943 ,0 ,6284692 ,1 ,293928 ,159 ,0 ,8 ,1377211 ,3 ,145548 ,0 ,0 ,138649 ,9897 ,89 ,19 ,0 ,0 ,4 ,175105 ,30900 ,264196 ,0 ,6673 ,481 ,41 ,89686 ,14569 ,158 ,50 ,1010 ,62 ,0 ,0 ,171078 ,267814 ,0 ,81 ,297 ,59962 ,64563 ,0 
+NA,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2941 ,1 ,2059 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,12112 ,28 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,28 ,0 ,0 ,190 ,0 ,1057 ,2731 ,0 ,0 ,0 ,0 ,140 ,0 ,0 ,0 ,0 ,0 ,0 ,1844 ,0 ,0 ,0 ,2145 ,0 ,0 ,0 ,0 ,0 ,27 ,0 ,3563 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,25417 ,0 ,0 ,0 ,21 ,0 ,319158 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3185 ,0 ,0 ,0 ,0 ,2 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,1558 ,9429 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,425 ,26222 ,0 ,0 ,0 ,0 ,14 ,1 ,23782 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,154 ,0 ,74 ,0 ,964 ,0 ,0 ,0 ,111 ,705 ,0 ,0 ,0 ,0 ,0 ,1974 ,6050 ,0 ,0 ,129 ,2154 ,22551 ,0 
+NP,0 ,0 ,0 ,11 ,400 ,5299 ,197 ,1469 ,0 ,2 ,0 ,0 ,12703 ,24565 ,23610 ,0 ,0 ,0 ,0 ,4733 ,7781 ,309 ,0 ,0 ,0 ,33 ,0 ,11 ,0 ,1693 ,3 ,109 ,0 ,1 ,1 ,9904 ,0 ,10393 ,0 ,1068 ,0 ,0 ,0 ,318 ,2633 ,131 ,0 ,0 ,26 ,0 ,0 ,654 ,0 ,3 ,1 ,0 ,6057 ,32371 ,9095 ,21912 ,0 ,0 ,8 ,8076 ,93 ,0 ,0 ,0 ,398 ,363 ,0 ,0 ,0 ,0 ,7767 ,469 ,0 ,0 ,0 ,0 ,0 ,0 ,4412 ,211091 ,676 ,10992 ,0 ,811102 ,0 ,33889 ,0 ,43 ,0 ,261788 ,0 ,0 ,0 ,181904 ,16118 ,0 ,31 ,0 ,0 ,13292 ,718 ,0 ,208 ,4420 ,974 ,1789 ,1163 ,1606 ,0 ,0 ,0 ,17086 ,17012 ,799 ,0 ,0 ,1227 ,0 ,0 ,187488 ,70814 ,488 ,0 ,0 ,0 ,1 ,199651 ,0 ,1340657 ,30103 ,4 ,42 ,0 ,0 ,251 ,0 ,123 ,0 ,0 ,29254 ,3020 ,1 ,0 ,0 ,0 ,0 ,68574 ,0 ,364 ,0 ,74 ,9468 ,1 ,27392 ,867 ,16 ,13 ,254 ,1 ,0 ,0 ,60826 ,254928 ,0 ,1572 ,30 ,698044 ,22612 ,0 
+NL,0 ,0 ,7507 ,0 ,140 ,6364 ,7 ,0 ,0 ,2864 ,0 ,0 ,0 ,37723 ,1479 ,953 ,262 ,917 ,0 ,3450 ,0 ,6333 ,0 ,0 ,0 ,9491 ,0 ,0 ,0 ,0 ,0 ,4779 ,0 ,546 ,0 ,0 ,308 ,1506 ,0 ,0 ,0 ,1024 ,0 ,0 ,0 ,0 ,0 ,0 ,611 ,535 ,0 ,127 ,0 ,0 ,1930 ,0 ,1094 ,0 ,192 ,0 ,62 ,170 ,0 ,0 ,3969 ,1237 ,0 ,547 ,3359 ,0 ,0 ,0 ,0 ,102 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,9534 ,4392 ,0 ,19104 ,30369 ,0 ,0 ,39 ,0 ,0 ,231 ,28556 ,61 ,17 ,0 ,0 ,1488 ,0 ,2721 ,0 ,0 ,0 ,34515 ,0 ,0 ,2036 ,36 ,9782 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,279 ,0 ,783 ,164106 ,0 ,1274 ,0 ,3 ,0 ,0 ,1656 ,210 ,3 ,0 ,0 ,1811 ,0 ,0 ,0 ,0 ,0 ,0 ,227 ,69 ,0 ,3230 ,0 ,1540 ,0 ,81538 ,0 ,0 ,669 ,0 ,0 ,0 ,0 ,0 ,1 ,1832 ,1033 ,0 ,0 ,0 ,0 ,12229 ,1523 ,0 ,27 ,0 ,104496 ,0 ,0 
+NC,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,318 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,310 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2622 ,49 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,773 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,96 ,0 ,0 ,0 ,178 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,60 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,814 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1258 ,0 ,0 ,0 ,9 ,1647 ,0 
+NZ,0 ,0 ,24063 ,0 ,0 ,10550 ,574 ,0 ,0 ,1301 ,2665 ,0 ,0 ,31717 ,0 ,17927 ,227 ,391 ,0 ,0 ,0 ,942 ,16336 ,0 ,0 ,1794 ,0 ,0 ,0 ,0 ,0 ,1690 ,2893 ,603 ,0 ,0 ,0 ,89 ,0 ,804 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,769 ,0 ,0 ,5938 ,0 ,0 ,0 ,24950 ,1000 ,239 ,0 ,0 ,14212 ,59 ,0 ,840 ,122 ,5083 ,5513 ,7108 ,0 ,0 ,0 ,0 ,344 ,0 ,0 ,0 ,0 ,0 ,10965 ,0 ,0 ,312 ,961 ,1380 ,739 ,0 ,16317 ,5195 ,0 ,0 ,120 ,0 ,0 ,0 ,0 ,13 ,0 ,0 ,0 ,6096 ,0 ,0 ,0 ,0 ,0 ,0 ,639 ,0 ,9965 ,1039 ,699 ,0 ,0 ,249 ,0 ,0 ,0 ,0 ,0 ,358 ,0 ,0 ,10540 ,0 ,6444 ,0 ,71 ,0 ,0 ,1376 ,173 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,115 ,0 ,0 ,0 ,400 ,92 ,250 ,0 ,0 ,0 ,0 ,0 ,17476 ,1023 ,747 ,0 ,0 ,0 ,756 ,0 ,523 ,0 ,26418 ,0 ,4445 ,8430 ,0 ,0 ,231 ,30534 ,0 ,0 
+NI,20 ,5929 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,85 ,0 ,1796 ,0 ,243576 ,2 ,1 ,0 ,0 ,0 ,0 ,1420 ,0 ,0 ,0 ,629 ,0 ,28 ,0 ,21814 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,609 ,0 ,169 ,0 ,0 ,12150 ,1248 ,147376 ,1999 ,0 ,0 ,27 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,3202 ,0 ,12 ,0 ,0 ,67 ,0 ,0 ,0 ,0 ,0 ,0 ,43018 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,1 ,0 ,0 ,301594 ,0 ,159 ,0 ,256 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,65 ,0 ,32644 ,0 ,0 ,0 ,0 ,1070 ,22795 ,15 ,0 ,0 ,0 ,11 ,0 ,0 ,0 ,0 ,4256 ,0 ,14922 ,0 ,0 ,0 ,3341 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,74628 ,1809 ,0 ,0 ,0 ,0 ,7654 ,0 ,34215 ,0 ,0 ,3895 ,0 ,0 ,0 ,2 ,0 ,0 ,73528 ,0 ,0 ,0 ,19 ,0 ,0 ,0 ,3566 ,1559 ,0 ,0 ,0 ,0 ,0 ,946 ,1439 ,0 ,0 ,80 ,38 ,78 ,0 
+NE,0 ,0 ,0 ,30 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,51917 ,26 ,0 ,35610 ,0 ,0 ,0 ,0 ,0 ,0 ,16844 ,0 ,0 ,0 ,2351 ,0 ,1122 ,0 ,21215 ,8 ,0 ,4104 ,0 ,0 ,404 ,0 ,11854 ,0 ,445 ,0 ,0 ,0 ,126 ,5 ,9843 ,3804035 ,0 ,0 ,0 ,5090 ,0 ,0 ,0 ,0 ,7660 ,0 ,47563 ,805 ,191 ,0 ,0 ,0 ,0 ,9240 ,1345 ,175 ,225 ,0 ,597024 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,717 ,0 ,114 ,0 ,0 ,0 ,10649 ,0 ,0 ,15727 ,0 ,25391 ,0 ,0 ,364 ,3380311 ,0 ,0 ,0 ,0 ,0 ,24 ,0 ,145 ,0 ,7633 ,68035 ,0 ,34066 ,4 ,55 ,2631 ,0 ,0 ,3305 ,0 ,0 ,0 ,600 ,74 ,0 ,0 ,0 ,0 ,0 ,3854 ,36944 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,25946 ,0 ,0 ,0 ,0 ,0 ,156669 ,0 ,1839520 ,0 ,0 ,1782 ,3319 ,0 ,0 ,0 ,0 ,0 ,9700 ,0 ,0 ,0 ,3403 ,0 ,12 ,0 ,1605 ,12055 ,0 ,4 ,0 ,0 ,0 ,4987 ,7182 ,0 ,0 ,0 ,1667 ,7 ,0 
+NG,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,187 ,152 ,2250 ,0 ,8297 ,0 ,0 ,0 ,0 ,0 ,0 ,284 ,0 ,0 ,0 ,26363 ,0 ,144790 ,0 ,6335877 ,25 ,0 ,50 ,0 ,0 ,5 ,0 ,60248 ,0 ,800624 ,0 ,0 ,1240988 ,27012 ,1487 ,371962 ,4514430 ,0 ,1145 ,0 ,54 ,4 ,0 ,0 ,0 ,80853 ,0 ,175983 ,155 ,87450 ,0 ,0 ,0 ,0 ,121 ,27 ,197475 ,13615 ,0 ,3982720 ,0 ,0 ,0 ,0 ,2 ,853 ,0 ,0 ,382099 ,0 ,241931 ,0 ,0 ,0 ,82 ,0 ,0 ,6714807 ,0 ,128849 ,0 ,65 ,844131 ,2008621 ,0 ,0 ,0 ,0 ,0 ,2754 ,0 ,2936116 ,0 ,11 ,1457858 ,0 ,575537 ,42 ,90203 ,37 ,1 ,0 ,70 ,0 ,0 ,0 ,25916 ,176473 ,0 ,363672 ,1 ,0 ,0 ,319020 ,142781 ,1088 ,0 ,0 ,0 ,0 ,0 ,0 ,4575741 ,50 ,308578 ,0 ,0 ,0 ,580057 ,0 ,4924388 ,0 ,0 ,589938 ,4016 ,0 ,14 ,0 ,0 ,0 ,86272 ,0 ,0 ,0 ,1415393 ,0 ,710042 ,135 ,8347 ,397064 ,0 ,0 ,0 ,0 ,0 ,356897 ,452831 ,0 ,0 ,15 ,50120 ,5146750 ,0 
+NU,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,39 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3231 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,15 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,137 ,0 
+KP,0 ,0 ,0 ,3 ,10 ,71873 ,0 ,17 ,0 ,119 ,0 ,0 ,0 ,52230 ,368257 ,0 ,0 ,0 ,0 ,77 ,71 ,29058 ,0 ,0 ,0 ,43 ,0 ,0 ,0 ,80 ,87 ,34 ,1 ,0 ,5377 ,0 ,0 ,23370 ,12 ,21 ,0 ,0 ,0 ,8 ,2 ,18590 ,0 ,0 ,6303 ,0 ,0 ,5383 ,0 ,0 ,33 ,0 ,30 ,112656 ,7168 ,7 ,0 ,121 ,14 ,0 ,20 ,1 ,0 ,7009 ,24 ,247 ,2 ,21009 ,3 ,4680 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,13 ,1 ,46 ,170 ,0 ,529479 ,0 ,20 ,0 ,8069 ,9 ,70088 ,0 ,0 ,0 ,10 ,0 ,11581 ,10805 ,15 ,0 ,7 ,0 ,0 ,8715 ,93 ,0 ,57 ,22871 ,14223 ,4 ,0 ,29 ,0 ,11 ,2 ,5 ,0 ,64 ,0 ,0 ,145886 ,5 ,7752 ,0 ,0 ,0 ,34 ,0 ,0 ,458852 ,0 ,142 ,51630 ,0 ,6 ,17 ,2 ,26658 ,0 ,0 ,156015 ,6 ,69 ,0 ,2 ,0 ,24 ,0 ,0 ,213 ,0 ,40294 ,328 ,29 ,307 ,54764 ,8516 ,11 ,24 ,45 ,0 ,0 ,65333 ,166534 ,0 ,58 ,5809 ,56726 ,0 ,0 
+NO,0 ,0 ,0 ,0 ,0 ,1483 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,139060 ,0 ,0 ,20 ,9 ,0 ,0 ,0 ,449 ,122 ,0 ,0 ,1480 ,0 ,0 ,0 ,0 ,0 ,913 ,0 ,189 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,85 ,267 ,0 ,0 ,0 ,0 ,0 ,0 ,6065 ,0 ,0 ,0 ,23 ,0 ,0 ,0 ,131 ,0 ,0 ,945 ,552 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,771 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,13840 ,0 ,0 ,0 ,0 ,57533 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1131 ,0 ,73 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,397 ,0 ,0 ,13028 ,0 ,0 ,0 ,0 ,0 ,0 ,3031 ,362 ,0 ,0 ,0 ,7694 ,7084 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1215 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,36 ,590 ,0 ,0 ,234 ,0 ,472 ,535 ,0 ,0 ,0 ,79369 ,0 ,0 
+OM,0 ,0 ,1912 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1609 ,1196 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,569 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,22312 ,1 ,0 ,0 ,0 ,0 ,0 ,70 ,0 ,0 ,0 ,0 ,0 ,23 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1626 ,0 ,0 ,0 ,0 ,620 ,0 ,1417 ,0 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,375 ,0 ,264 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,559 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3437 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,129 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,245 ,3009 ,0 ,0 ,0 ,0 ,0 ,1466 ,11504 ,0 ,0 ,926 ,1074 ,0 ,0 
+PK,0 ,0 ,0 ,7843 ,344 ,58679 ,14448 ,0 ,0 ,0 ,0 ,0 ,32595 ,49621 ,238240 ,0 ,228 ,0 ,0 ,0 ,0 ,5528 ,0 ,0 ,0 ,17045 ,0 ,0 ,0 ,14 ,3006 ,10163 ,0 ,947 ,0 ,939884 ,0 ,34622 ,0 ,9 ,0 ,0 ,0 ,1417 ,0 ,2096150 ,0 ,0 ,2212 ,0 ,100135 ,7300 ,0 ,66 ,0 ,0 ,5374 ,158246 ,9259 ,0 ,0 ,14427 ,7 ,0 ,1977 ,0 ,0 ,0 ,29155 ,133498 ,0 ,0 ,0 ,0 ,0 ,2641 ,0 ,0 ,0 ,0 ,0 ,0 ,11620 ,9973 ,311 ,2371 ,0 ,1270601 ,0 ,202772 ,0 ,2430 ,0 ,325926 ,0 ,0 ,0 ,0 ,112 ,4179 ,0 ,0 ,0 ,0 ,24930 ,62 ,140560 ,134207 ,1633 ,33547 ,11213 ,1171 ,0 ,0 ,0 ,8 ,68844 ,0 ,143 ,0 ,5055 ,0 ,0 ,123098 ,24856 ,27092 ,0 ,0 ,0 ,0 ,389041 ,0 ,3147715 ,21990 ,0 ,0 ,0 ,298 ,162237 ,0 ,128432 ,0 ,0 ,101 ,18015 ,6398 ,0 ,0 ,0 ,478 ,1060546 ,0 ,98737 ,0 ,1745 ,50745 ,0 ,540 ,50450 ,55660 ,0 ,66172 ,0 ,0 ,0 ,67836 ,66575 ,0 ,1681 ,37116 ,8620380 ,14791 ,0 
+PW,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+PA,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1623 ,0 ,8050 ,0 ,10225 ,0 ,0 ,0 ,0 ,0 ,0 ,163 ,0 ,0 ,0 ,427 ,0 ,0 ,0 ,1006 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,128 ,0 ,0 ,0 ,0 ,8133 ,4472 ,16633 ,0 ,0 ,0 ,307 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2227 ,0 ,2 ,0 ,0 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,257 ,0 ,0 ,54892 ,0 ,1089 ,0 ,1948 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10 ,0 ,6602 ,0 ,0 ,0 ,0 ,540 ,4605 ,209 ,0 ,0 ,0 ,0 ,0 ,0 ,3983 ,0 ,1859 ,0 ,16177 ,0 ,0 ,0 ,1045 ,3500 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,100771 ,8 ,0 ,0 ,0 ,0 ,393 ,0 ,1340 ,0 ,0 ,273 ,0 ,0 ,0 ,0 ,0 ,0 ,31512 ,0 ,0 ,0 ,0 ,0 ,0 ,205 ,1512 ,607 ,0 ,1 ,0 ,0 ,0 ,2255 ,3474 ,0 ,0 ,871 ,0 ,3590 ,487 
+PG,0 ,0 ,0 ,0 ,0 ,0 ,0 ,61 ,0 ,0 ,28 ,0 ,76428 ,0 ,13 ,0 ,0 ,0 ,0 ,0 ,0 ,57 ,0 ,0 ,0 ,13 ,0 ,169 ,0 ,15390 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,111 ,52 ,0 ,230 ,0 ,95520 ,195670 ,41013 ,15 ,0 ,0 ,33 ,0 ,0 ,27 ,0 ,0 ,0 ,0 ,0 ,109217 ,8 ,10 ,0 ,0 ,0 ,0 ,44 ,0 ,23391 ,0 ,0 ,1419 ,0 ,0 ,0 ,0 ,0 ,4 ,175 ,175 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2254 ,0 ,101 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,177 ,9808 ,0 ,201271 ,0 ,0 ,0 ,0 ,58 ,57 ,9 ,0 ,0 ,0 ,57 ,0 ,0 ,0 ,0 ,1106 ,0 ,0 ,0 ,0 ,0 ,208 ,7022 ,66 ,1767 ,0 ,0 ,0 ,0 ,0 ,344 ,22942 ,9339 ,0 ,0 ,0 ,0 ,0 ,1134 ,0 ,0 ,79 ,381 ,23 ,0 ,0 ,0 ,0 ,12587 ,50 ,0 ,0 ,132756 ,0 ,33344 ,4104 ,106 ,110 ,0 ,287 ,0 ,0 ,845 ,11752 ,18663 ,0 ,0 ,0 ,0 ,20778 ,0 
+PY,0 ,0 ,2239 ,0 ,1 ,77 ,1 ,0 ,1 ,0 ,2393 ,0 ,8713 ,0 ,70568 ,0 ,0 ,0 ,0 ,19280 ,11 ,4 ,0 ,0 ,0 ,1170 ,0 ,0 ,146 ,181751 ,5288 ,1 ,11 ,1 ,74 ,1 ,0 ,958 ,0 ,0 ,0 ,52 ,0 ,0 ,289 ,11932 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,1 ,1 ,0 ,129434 ,1941 ,194 ,0 ,0 ,394 ,1096 ,1211 ,0 ,0 ,57 ,1131 ,43 ,24771 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,615 ,1 ,4 ,26 ,0 ,1028797 ,36 ,4186 ,26055 ,7931 ,0 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,161 ,15997 ,0 ,0 ,0 ,13 ,5338 ,7956 ,1072 ,5605 ,194 ,30 ,0 ,0 ,0 ,0 ,1 ,6470 ,0 ,5 ,290 ,0 ,0 ,241 ,0 ,1998 ,0 ,1 ,101 ,0 ,47930 ,0 ,157198 ,76 ,0 ,28 ,0 ,0 ,46438 ,0 ,30664 ,55 ,0 ,3286232 ,0 ,0 ,0 ,384 ,2 ,0 ,103772 ,0 ,31160 ,0 ,5238 ,2175 ,0 ,377 ,3476 ,1363 ,0 ,2537 ,8872 ,0 ,0 ,2619 ,3764 ,0 ,1 ,22897 ,471215 ,2 ,0 
+PE,79 ,11 ,82973 ,2 ,78 ,7977 ,77 ,0 ,3178 ,32131 ,45680 ,0 ,128797 ,116999 ,68480 ,0 ,13 ,0 ,10118 ,52835 ,1 ,2288 ,0 ,0 ,0 ,8160 ,0 ,593 ,16 ,107838 ,23 ,4633 ,9376 ,1 ,138 ,457 ,0 ,9065 ,0 ,3401 ,0 ,1 ,163210 ,2443 ,399251 ,7801 ,12287 ,0 ,2443 ,0 ,121 ,19 ,0 ,478 ,1 ,0 ,3 ,14349 ,7610 ,0 ,0 ,32782 ,788 ,251 ,4312 ,13173 ,43501 ,66 ,34411 ,3063 ,0 ,2 ,0 ,0 ,171 ,4 ,0 ,0 ,0 ,0 ,0 ,0 ,26068 ,2829 ,5806 ,1076 ,11062 ,433230 ,7 ,31581 ,0 ,1171 ,0 ,0 ,0 ,64 ,0 ,0 ,0 ,778 ,15440 ,69451 ,0 ,0 ,0 ,20111 ,15154 ,29357 ,12374 ,41865 ,4945 ,392 ,87 ,0 ,0 ,0 ,2105 ,14800 ,0 ,153252 ,803 ,0 ,0 ,329049 ,1188 ,7785 ,0 ,658 ,64089 ,0 ,7 ,0 ,414276 ,41579 ,20 ,28 ,0 ,0 ,347 ,0 ,58 ,0 ,0 ,692 ,902 ,1439 ,0 ,1232 ,9027 ,2 ,79060 ,0 ,0 ,0 ,14375 ,17079 ,0 ,2057 ,200 ,4928 ,0 ,25056 ,0 ,0 ,0 ,2612 ,3882 ,0 ,45 ,4143 ,106721 ,2 ,306 
+PH,137462 ,4052 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,180 ,5213 ,0 ,194099 ,0 ,41583 ,0 ,0 ,0 ,0 ,0 ,0 ,7964 ,0 ,0 ,0 ,0 ,0 ,28800 ,0 ,217046 ,63 ,0 ,0 ,0 ,0 ,0 ,0 ,5195 ,0 ,0 ,0 ,0 ,29665 ,3578001 ,113287 ,8 ,244 ,0 ,1937 ,0 ,0 ,21558 ,925 ,0 ,0 ,0 ,71196 ,161197 ,2579 ,3898 ,0 ,365 ,5165 ,0 ,2963 ,0 ,0 ,0 ,1774 ,23774 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,635 ,0 ,0 ,0 ,0 ,2533485 ,0 ,188783 ,0 ,1011 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2524 ,0 ,64275 ,0 ,16519 ,0 ,0 ,17856 ,1369 ,7692 ,0 ,0 ,0 ,0 ,0 ,0 ,453 ,0 ,65165 ,0 ,0 ,0 ,0 ,0 ,7242 ,36267 ,18948 ,0 ,0 ,0 ,2321 ,0 ,0 ,2336337 ,6763 ,219003 ,0 ,0 ,0 ,0 ,0 ,110 ,0 ,0 ,400 ,0 ,0 ,0 ,0 ,0 ,0 ,397425 ,0 ,0 ,0 ,84037 ,8657 ,15070 ,0 ,28790 ,16369 ,0 ,356535 ,0 ,0 ,0 ,139243 ,589577 ,0 ,0 ,8381 ,0 ,2479 ,0 
+PL,0 ,0 ,1273 ,0 ,0 ,152348 ,752 ,0 ,0 ,1539 ,0 ,0 ,0 ,675473 ,16655 ,179 ,18309 ,9342 ,0 ,22478 ,45637 ,16125 ,0 ,0 ,0 ,18295 ,0 ,0 ,0 ,0 ,0 ,10173 ,65037 ,9968 ,0 ,1 ,0 ,2400 ,0 ,0 ,0 ,1805 ,0 ,0 ,0 ,0 ,0 ,51 ,6954 ,41864 ,0 ,161 ,0 ,0 ,260 ,0 ,26362 ,1537 ,1100 ,0 ,5109 ,769 ,0 ,119 ,4747 ,2 ,126706 ,0 ,6956 ,0 ,4028 ,2076 ,0 ,1811 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,261796 ,0 ,0 ,2630 ,4605 ,166574 ,891409 ,165536 ,0 ,0 ,0 ,0 ,10394 ,572643 ,4415 ,0 ,505 ,0 ,5 ,477289 ,0 ,1871 ,38129 ,0 ,0 ,23315 ,0 ,0 ,20902 ,614 ,5348 ,0 ,0 ,0 ,0 ,72 ,0 ,0 ,0 ,14619 ,0 ,498 ,216814 ,93306 ,3538 ,0 ,5 ,0 ,0 ,980347 ,17470 ,4 ,0 ,0 ,853333 ,0 ,0 ,0 ,0 ,3 ,0 ,24636 ,6627 ,0 ,429 ,3261 ,33793 ,0 ,246018 ,0 ,0 ,7168 ,0 ,0 ,0 ,0 ,0 ,9891 ,8758 ,1173886 ,0 ,0 ,14 ,0 ,72155 ,109 ,2392 ,2274 ,13 ,2371278 ,0 ,0 
+PT,0 ,0 ,50 ,50692 ,0 ,14633 ,522 ,0 ,4 ,142 ,9350 ,0 ,1122 ,18938 ,3447 ,1 ,124 ,0 ,0 ,3560 ,0 ,7561 ,1 ,0 ,8491 ,2684 ,0 ,0 ,0 ,0 ,0 ,4766 ,0 ,6271 ,49565 ,1073 ,0 ,1139 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,223 ,0 ,0 ,94 ,0 ,4372 ,6 ,0 ,46334 ,1586 ,628 ,0 ,0 ,151448 ,22 ,68 ,664 ,2801 ,0 ,137 ,2221 ,7 ,334 ,2 ,0 ,10 ,0 ,0 ,0 ,0 ,0 ,3214 ,0 ,21 ,1595 ,9 ,2548 ,4 ,5464 ,71218 ,42400 ,0 ,0 ,2202 ,0 ,0 ,7 ,44800 ,39 ,0 ,0 ,93002 ,36370 ,0 ,0 ,0 ,0 ,335979 ,2062 ,17368 ,0 ,13 ,3958 ,11369 ,0 ,0 ,0 ,0 ,1 ,148 ,0 ,0 ,1839 ,0 ,0 ,17941 ,14556 ,5106 ,0 ,185 ,0 ,0 ,1000 ,799 ,26094 ,3062 ,0 ,11514 ,9 ,0 ,0 ,0 ,2 ,15435 ,107 ,9 ,0 ,977 ,181 ,836 ,0 ,90 ,58 ,0 ,6827 ,0 ,2861 ,2667 ,0 ,21 ,336 ,15069 ,9235 ,2462 ,0 ,2 ,0 ,26766 ,589 ,39 ,5178 ,644 ,29955 ,82 ,0 
+PR,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,200 ,0 ,1595 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,33 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,173 ,0 ,0 ,0 ,0 ,0 ,139 ,7470 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,589 ,0 ,0 ,0 ,0 ,33 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,75 ,0 ,0 ,0 ,0 ,12 ,0 ,817 ,0 ,11 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1439 ,239 ,0 ,0 ,0 ,0 ,0 ,0 ,112 ,0 ,133 ,0 ,3512 ,0 ,0 ,0 ,0 ,0 ,641 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,349 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,35 ,0 ,0 ,0 ,70 ,0 ,0 ,0 ,1 ,238 ,0 ,0 ,0 ,0 ,0 ,0 ,1287 ,0 ,0 ,0 ,0 ,174 ,0 
+QA,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,87 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,41 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,491 ,0 ,0 ,0 ,1 ,0 ,0 
+RO,0 ,0 ,157105 ,73 ,9712 ,52835 ,2077 ,0 ,129 ,165 ,0 ,0 ,0 ,446593 ,26228 ,57 ,256 ,404 ,0 ,9158 ,397 ,26595 ,0 ,206 ,0 ,7376 ,0 ,0 ,0 ,0 ,0 ,2886 ,1621 ,3309 ,10 ,85 ,0 ,9990 ,0 ,0 ,0 ,127180 ,0 ,0 ,0 ,5 ,7 ,17 ,6844 ,20 ,0 ,4219 ,0 ,1 ,32 ,0 ,2713 ,5080 ,5800 ,0 ,34 ,173697 ,0 ,156437 ,5007 ,14 ,330 ,31 ,2395 ,1184 ,655 ,1187 ,1449 ,252 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,162266 ,0 ,61 ,148 ,1536 ,75 ,2688586 ,57724 ,0 ,0 ,4523 ,0 ,2933 ,49 ,150003 ,0 ,11278 ,0 ,42 ,82276 ,0 ,0 ,2512 ,0 ,2 ,17302 ,0 ,0 ,89996 ,1735 ,3147 ,0 ,0 ,0 ,0 ,29271 ,0 ,0 ,0 ,67591 ,0 ,3115 ,176656 ,1399 ,1443 ,0 ,1075 ,0 ,0 ,350897 ,70 ,4270 ,0 ,0 ,11057 ,0 ,6 ,0 ,0 ,9579 ,0 ,2589 ,170155 ,25 ,104 ,0 ,3233 ,0 ,22631 ,0 ,0 ,1195026 ,0 ,0 ,0 ,0 ,0 ,839 ,22909 ,55297 ,0 ,0 ,66 ,0 ,23922 ,75 ,57 ,1921 ,16515 ,2287257 ,0 ,0 
+RU,0 ,0 ,0 ,15 ,56593 ,219835 ,12102 ,36 ,0 ,64 ,0 ,0 ,0 ,8203403 ,3449 ,30 ,897 ,569 ,0 ,3883 ,817363 ,75613 ,0 ,0 ,0 ,45641 ,0 ,1 ,0 ,174 ,248 ,1999 ,40011 ,10765 ,4882 ,309805 ,2 ,81 ,26 ,47 ,0 ,0 ,0 ,16 ,5 ,10 ,0 ,113 ,40797 ,70154 ,0 ,80 ,0 ,0 ,45240 ,0 ,1422496 ,1633 ,20859 ,13 ,14508 ,71934 ,29 ,567 ,13 ,4 ,0 ,3 ,26435 ,135 ,858 ,3598 ,6559 ,127 ,0 ,21470 ,0 ,0 ,0 ,0 ,0 ,687 ,27 ,114108 ,23 ,883821 ,49702 ,2670401 ,1980383 ,8 ,0 ,39 ,20 ,359527 ,1035 ,2108184 ,75205 ,166521 ,0 ,6224 ,2315562 ,32 ,0 ,41921 ,0 ,4 ,61265 ,23 ,0 ,1253809 ,6111 ,8998 ,8 ,0 ,9 ,0 ,24 ,1 ,10 ,0 ,42183 ,0 ,0 ,1205237 ,2251 ,41100 ,0 ,611 ,0 ,73 ,1424693 ,24105 ,195215 ,0 ,307 ,980462 ,0 ,152762 ,4 ,5 ,49114 ,0 ,40388 ,2618720 ,52 ,36 ,4 ,31875 ,0 ,918465 ,0 ,0 ,8289550 ,116 ,105 ,699 ,64 ,506 ,65 ,82616 ,95358 ,10 ,98 ,0 ,0 ,187189 ,104413 ,97476 ,14240 ,100619 ,28664062 ,0 ,0 
+RW,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,184 ,0 ,98813 ,2 ,378682 ,0 ,0 ,0 ,0 ,0 ,0 ,1862 ,0 ,0 ,0 ,1510 ,0 ,37 ,0 ,189896 ,3 ,0 ,8 ,0 ,0 ,30 ,0 ,0 ,0 ,3 ,6 ,0 ,5 ,130 ,17562 ,0 ,7 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10876 ,0 ,0 ,0 ,1 ,0 ,0 ,551 ,0 ,3 ,0 ,0 ,18912 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,0 ,742 ,0 ,0 ,0 ,0 ,238573 ,0 ,142 ,0 ,0 ,62 ,10629 ,0 ,0 ,0 ,0 ,1 ,3 ,0 ,4057 ,0 ,16 ,0 ,0 ,2387 ,1266 ,74 ,16893 ,0 ,0 ,326 ,0 ,0 ,1 ,10 ,2356 ,0 ,26571 ,0 ,0 ,0 ,62993 ,37 ,46934 ,4604 ,0 ,0 ,0 ,0 ,0 ,26493 ,6 ,23 ,0 ,0 ,6 ,53 ,21 ,144528 ,0 ,0 ,25552 ,59 ,0 ,0 ,0 ,0 ,0 ,8370 ,0 ,113 ,0 ,103091 ,0 ,27682 ,20428 ,4115 ,8390 ,0 ,1920 ,0 ,0 ,0 ,6884 ,5835 ,0 ,0 ,0 ,8823 ,3324 ,0 
+LC,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,957 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,442 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,26 ,2227 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,251 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,34 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,60 ,0 
+WS,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+ST,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,211 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,255 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,28086 ,172 ,163 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,346 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1654 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,121 ,0 ,0 ,0 ,0 ,379 ,0 
+SA,0 ,0 ,27728 ,0 ,0 ,1 ,7 ,0 ,0 ,0 ,0 ,0 ,19 ,76059 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,342 ,0 ,0 ,0 ,1272 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,1137 ,0 ,336 ,0 ,0 ,0 ,0 ,13 ,0 ,0 ,0 ,705 ,0 ,138894 ,3993 ,0 ,1 ,0 ,0 ,29303 ,38834 ,2 ,0 ,0 ,8737 ,0 ,33 ,341 ,0 ,0 ,0 ,0 ,483 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1492 ,0 ,287 ,0 ,0 ,13065 ,0 ,3836 ,0 ,2385 ,0 ,5190 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2353 ,0 ,6430 ,25 ,8 ,3 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,18818 ,4689 ,2322 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2943 ,0 ,54263 ,69 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,0 ,6 ,12110 ,0 ,1 ,0 ,0 ,0 ,13985 ,14064 ,0 ,0 ,22188 ,82222 ,0 ,0 
+SN,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11736 ,1409 ,31 ,788 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,21099 ,0 ,90590 ,0 ,0 ,2497 ,0 ,0 ,0 ,0 ,0 ,0 ,49 ,0 ,0 ,10 ,1278 ,0 ,18194 ,280160 ,0 ,0 ,0 ,265 ,399 ,0 ,0 ,0 ,6365 ,0 ,12690 ,0 ,0 ,0 ,0 ,0 ,0 ,1334 ,0 ,117 ,0 ,0 ,1210920 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,54 ,0 ,0 ,0 ,9 ,0 ,0 ,0 ,0 ,279821 ,0 ,16495 ,0 ,0 ,10561 ,1018229 ,0 ,0 ,0 ,0 ,0 ,2430 ,0 ,11403 ,0 ,0 ,777 ,0 ,12519 ,7017 ,3 ,432 ,0 ,0 ,0 ,0 ,0 ,0 ,4112 ,25 ,0 ,523 ,0 ,0 ,0 ,6101 ,83 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,379741 ,224 ,7 ,0 ,0 ,0 ,36153 ,1 ,272422 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,11502 ,0 ,0 ,0 ,2430 ,0 ,1 ,0 ,2 ,4291 ,0 ,2378 ,0 ,0 ,0 ,2748 ,47571 ,0 ,0 ,87682 ,709 ,208 ,0 
+RS,0 ,0 ,44197 ,36 ,661 ,26313 ,5685 ,0 ,1 ,10 ,0 ,0 ,0 ,105606 ,9057 ,7119 ,545 ,5 ,0 ,8510 ,4 ,8056 ,0 ,72 ,9 ,2819 ,0 ,0 ,0 ,0 ,0 ,5 ,4745 ,4448 ,400 ,56 ,104 ,10386 ,0 ,0 ,0 ,60473 ,0 ,0 ,0 ,0 ,4761 ,0 ,2497 ,15 ,0 ,83 ,0 ,1062 ,0 ,0 ,23 ,6397 ,1478 ,0 ,11 ,19831 ,0 ,2842 ,14946 ,2 ,3085 ,9 ,6239 ,32 ,3197 ,181 ,182 ,27 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7650 ,0 ,4 ,64 ,28 ,6 ,844897 ,23035 ,0 ,0 ,366 ,0 ,110 ,3690 ,1698 ,0 ,2490 ,0 ,19 ,17116 ,0 ,0 ,1066 ,0 ,104 ,4483 ,499 ,0 ,12108 ,7185 ,5298 ,0 ,0 ,0 ,0 ,3771 ,0 ,0 ,0 ,72195 ,0 ,961 ,31561 ,1678 ,238 ,0 ,1963 ,0 ,0 ,24567 ,23110 ,61 ,0 ,0 ,4725 ,0 ,2 ,1 ,0 ,2614 ,0 ,19684 ,231428 ,8 ,3 ,0 ,6732 ,0 ,37400 ,0 ,0 ,204555 ,0 ,0 ,41 ,0 ,0 ,6732 ,7818 ,28130 ,0 ,0 ,23 ,0 ,1337 ,7176 ,8484 ,3292 ,5645 ,583991 ,0 ,0 
+SL,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,674 ,0 ,0 ,0 ,0 ,0 ,0 ,1413 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,101778 ,0 ,0 ,11263 ,0 ,0 ,0 ,0 ,0 ,0 ,17595 ,0 ,0 ,131538 ,4525 ,1538 ,486 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,345 ,0 ,16060 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,427 ,0 ,0 ,42583 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,25579 ,0 ,0 ,0 ,0 ,0 ,0 ,16617 ,0 ,6183 ,0 ,3 ,0 ,29647 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,36658 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,3443 ,0 ,0 ,0 ,0 ,0 ,0 ,961 ,167 ,0 ,8224 ,0 ,0 ,0 ,8 ,102750 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,602091 ,0 ,146 ,0 ,0 ,0 ,5881 ,13 ,53094 ,0 ,0 ,54 ,485 ,0 ,0 ,0 ,0 ,0 ,1154 ,0 ,0 ,0 ,24390 ,0 ,1164 ,0 ,103 ,2187 ,0 ,66 ,0 ,0 ,0 ,7835 ,48346 ,0 ,0 ,0 ,0 ,193 ,0 
+SG,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,42 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,4 ,0 ,14 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,12 ,42 ,25 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,1 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,231 ,0 ,59 ,0 ,0 ,0 ,1 ,4 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,1 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,362 ,3 ,86 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,13 ,0 ,0 ,0 ,1 ,0 ,0 ,2 ,1 ,1 ,0 ,20 ,0 ,0 ,0 ,147 ,67 ,0 ,0 ,4 ,0 ,0 ,0 
+SK,0 ,0 ,31030 ,3 ,41 ,1996 ,225 ,0 ,0 ,171 ,0 ,0 ,0 ,122307 ,226 ,4404 ,179 ,41 ,0 ,103 ,26 ,518 ,0 ,198 ,0 ,640 ,0 ,0 ,0 ,0 ,0 ,63 ,928 ,225 ,6 ,476 ,0 ,249 ,0 ,0 ,0 ,12992 ,0 ,0 ,0 ,0 ,0 ,0 ,71 ,210 ,0 ,4 ,0 ,0 ,987 ,0 ,275 ,9104 ,171 ,0 ,49 ,8398 ,0 ,2723 ,686 ,48 ,557 ,4 ,1141 ,0 ,1 ,49 ,8 ,355 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1933 ,0 ,569 ,14 ,588 ,364 ,190026 ,33149 ,0 ,0 ,18 ,0 ,1429 ,396 ,31502 ,0 ,5456 ,0 ,3 ,6559 ,0 ,193 ,9685 ,0 ,0 ,1263 ,0 ,0 ,9677 ,363 ,107 ,0 ,0 ,0 ,0 ,91 ,0 ,0 ,0 ,596 ,0 ,1603 ,6440 ,1172 ,270 ,0 ,5 ,0 ,0 ,147706 ,11 ,0 ,0 ,0 ,10691 ,0 ,6 ,0 ,0 ,1163 ,0 ,58 ,41984 ,7 ,173 ,7 ,259 ,0 ,20642 ,0 ,0 ,55544 ,0 ,0 ,0 ,0 ,0 ,7 ,320 ,4227 ,0 ,0 ,67 ,0 ,318 ,1942 ,1563 ,1373 ,130 ,398342 ,0 ,0 
+SI,0 ,0 ,4290 ,13 ,4 ,2286 ,77 ,0 ,29 ,114 ,0 ,0 ,0 ,22057 ,336 ,2169 ,143 ,26 ,0 ,38 ,718 ,921 ,0 ,19 ,14 ,277 ,400 ,0 ,0 ,0 ,0 ,132 ,1881 ,200 ,37 ,0 ,2 ,233 ,0 ,1 ,0 ,5026 ,0 ,0 ,0 ,0 ,1 ,0 ,171 ,11 ,0 ,25 ,0 ,24 ,2 ,0 ,309 ,11 ,184 ,0 ,4 ,14276 ,0 ,516 ,407 ,7 ,10127 ,0 ,130 ,0 ,141 ,0 ,1 ,1490 ,0 ,0 ,0 ,0 ,0 ,18 ,0 ,317 ,20 ,1 ,1219 ,3 ,3 ,33158 ,9143 ,0 ,0 ,19 ,0 ,193 ,967 ,7164 ,0 ,0 ,0 ,1 ,373 ,0 ,116 ,4440 ,0 ,1223 ,508 ,70 ,0 ,340 ,292 ,251 ,0 ,0 ,2 ,0 ,350 ,0 ,2 ,0 ,82 ,0 ,9 ,2897 ,602 ,180 ,0 ,15 ,0 ,0 ,3223 ,33 ,0 ,0 ,0 ,691 ,0 ,1 ,0 ,0 ,82 ,4 ,13 ,1678 ,1 ,40 ,0 ,132 ,0 ,118 ,0 ,0 ,527 ,0 ,0 ,50 ,0 ,0 ,14 ,279 ,2832 ,0 ,0 ,2072 ,0 ,124 ,1779 ,12 ,407 ,23 ,28808 ,0 ,0 
+SB,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,117 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,107 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11290 ,47060 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3039 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,700 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6363 ,0 ,0 ,0 ,72 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,247 ,0 ,0 ,0 ,0 ,3849 ,0 
+SO,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,17 ,0 ,1272 ,62 ,86587 ,0 ,0 ,0 ,0 ,0 ,0 ,157 ,0 ,0 ,0 ,15 ,0 ,7 ,0 ,9714 ,53 ,0 ,0 ,0 ,0 ,5 ,0 ,2 ,0 ,59 ,4 ,0 ,0 ,4309 ,49 ,17805 ,8 ,0 ,0 ,0 ,2472 ,0 ,79 ,0 ,0 ,0 ,0 ,16444 ,2 ,0 ,0 ,0 ,973 ,0 ,23 ,0 ,0 ,1 ,26 ,7650 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,7 ,0 ,0 ,3 ,0 ,100130 ,0 ,115 ,0 ,0 ,0 ,17 ,0 ,0 ,0 ,1 ,0 ,30 ,13 ,0 ,0 ,240 ,3 ,0 ,1268 ,1031 ,28 ,0 ,0 ,2 ,2 ,0 ,0 ,348 ,115 ,45 ,0 ,0 ,2 ,0 ,0 ,1 ,244 ,0 ,36 ,0 ,0 ,0 ,0 ,0 ,1385 ,150 ,0 ,0 ,0 ,24 ,31892 ,83 ,43177 ,0 ,0 ,2 ,6 ,6 ,0 ,0 ,0 ,0 ,6168 ,0 ,41 ,0 ,852 ,1 ,0 ,1 ,356 ,389 ,0 ,13 ,0 ,0 ,0 ,11803 ,17586 ,0 ,0 ,1023 ,2510 ,47 ,0 
+ZA,0 ,0 ,50411 ,7 ,0 ,24188 ,2632 ,0 ,0 ,0 ,18713 ,0 ,6444 ,138659 ,49853 ,0 ,248 ,0 ,0 ,0 ,591 ,2934 ,0 ,0 ,0 ,7458 ,0 ,107 ,0 ,142 ,8869 ,812 ,26101 ,210 ,0 ,0 ,1720 ,0 ,0 ,273 ,0 ,0 ,0 ,4 ,0 ,41177 ,11156 ,0 ,1671 ,0 ,1 ,0 ,3026 ,594 ,0 ,0 ,0 ,6237 ,0 ,0 ,0 ,110077 ,13289 ,0 ,3598 ,0 ,36476 ,0 ,1642 ,37895 ,0 ,0 ,0 ,379 ,1 ,1043 ,0 ,0 ,0 ,0 ,0 ,0 ,28311 ,0 ,2113 ,0 ,10001 ,2605703 ,0 ,4789 ,0 ,1757 ,0 ,12782 ,0 ,354706 ,0 ,0 ,0 ,14953 ,26852 ,0 ,0 ,5673 ,0 ,0 ,29061 ,37191 ,1314 ,902 ,9812 ,11958 ,1 ,0 ,0 ,0 ,7097 ,9055 ,0 ,0 ,6824 ,0 ,0 ,68050 ,1525 ,31052 ,0 ,0 ,0 ,0 ,74243 ,0 ,1080 ,573 ,0 ,2059 ,0 ,0 ,13 ,1948 ,42508 ,0 ,0 ,699420 ,0 ,0 ,0 ,847 ,0 ,0 ,281174 ,0 ,503488 ,0 ,30062 ,6067 ,0 ,1066 ,4857 ,8511 ,0 ,4 ,0 ,0 ,0 ,18921 ,14728 ,0 ,0 ,4895 ,509248 ,716 ,0 
+GS,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+KR,0 ,0 ,0 ,0 ,0 ,31193 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,34984 ,6115 ,0 ,0 ,0 ,0 ,0 ,1594 ,34987 ,0 ,0 ,0 ,2984 ,0 ,0 ,0 ,0 ,0 ,0 ,9279 ,0 ,32230 ,0 ,0 ,33581 ,0 ,186 ,0 ,0 ,0 ,0 ,0 ,244 ,0 ,0 ,4662 ,0 ,0 ,303 ,0 ,0 ,0 ,0 ,34645 ,31229 ,25538 ,2906 ,0 ,12895 ,0 ,0 ,0 ,0 ,0 ,15369 ,0 ,3757 ,0 ,11 ,0 ,29 ,0 ,0 ,0 ,0 ,0 ,542 ,0 ,0 ,0 ,0 ,3781 ,0 ,0 ,11283 ,0 ,0 ,0 ,3270 ,0 ,1010 ,0 ,0 ,166 ,0 ,0 ,8901 ,74 ,0 ,0 ,35835 ,0 ,0 ,14658 ,0 ,0 ,0 ,19944 ,9052 ,0 ,0 ,21689 ,0 ,0 ,32 ,0 ,0 ,6958 ,0 ,0 ,23600 ,5656 ,9228 ,0 ,0 ,0 ,0 ,1008 ,0 ,679859 ,0 ,0 ,1 ,0 ,0 ,22760 ,0 ,1605 ,0 ,0 ,54763 ,0 ,4526 ,0 ,5668 ,0 ,0 ,0 ,0 ,0 ,0 ,22102 ,19540 ,0 ,2264 ,11638 ,5493 ,0 ,0 ,0 ,0 ,0 ,52686 ,68692 ,0 ,566 ,11480 ,5300 ,0 ,0 
+SS,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,17 ,0 ,22987 ,1 ,1618 ,0 ,0 ,0 ,0 ,10465 ,0 ,61 ,0 ,0 ,0 ,6 ,0 ,2 ,0 ,86090 ,435 ,0 ,96 ,0 ,0 ,7008 ,0 ,127 ,0 ,22 ,1 ,0 ,45 ,20 ,237 ,130 ,297 ,0 ,1219 ,0 ,5964 ,2216 ,374 ,0 ,0 ,0 ,24297 ,22978 ,198 ,0 ,0 ,3 ,913 ,0 ,28 ,0 ,0 ,3 ,9 ,113049 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,1027 ,82 ,1 ,169 ,0 ,200820 ,0 ,1951 ,0 ,481 ,787 ,5467 ,0 ,0 ,0 ,5 ,0 ,124 ,6 ,22 ,0 ,205 ,1 ,0 ,1733 ,486 ,27 ,91 ,0 ,1 ,3 ,0 ,0 ,0 ,1959 ,441 ,0 ,4414 ,1 ,0 ,0 ,18344 ,20968 ,1351 ,13 ,0 ,0 ,0 ,12 ,0 ,7167 ,531 ,1 ,0 ,0 ,139 ,120533 ,32 ,720068 ,0 ,0 ,40 ,2 ,2 ,0 ,0 ,0 ,0 ,13658 ,0 ,27636 ,0 ,10196 ,170 ,3 ,7 ,13 ,10472 ,0 ,2394 ,0 ,0 ,0 ,13454 ,53527 ,164 ,0 ,1015 ,1453 ,22359 ,0 
+ES,0 ,0 ,219049 ,693357 ,1581 ,30033 ,19887 ,0 ,13929 ,14249 ,15481 ,0 ,9097 ,2753050 ,7379 ,3713 ,241 ,0 ,0 ,20939 ,6 ,12381 ,6381 ,0 ,65657 ,6908 ,173 ,0 ,0 ,0 ,0 ,40219 ,0 ,27789 ,35485 ,30612 ,228 ,21774 ,0 ,1326 ,0 ,2191 ,0 ,0 ,0 ,62542 ,0 ,0 ,7707 ,17 ,671 ,3710 ,0 ,15897 ,44936 ,0 ,2576 ,11191 ,27745 ,0 ,0 ,889417 ,2522 ,253229 ,7863 ,8083 ,51210 ,1990 ,15608 ,1 ,13404 ,631 ,2 ,624 ,0 ,0 ,0 ,0 ,0 ,1546 ,0 ,99911 ,48236 ,30280 ,34396 ,50 ,2385 ,340805 ,88650 ,0 ,0 ,19105 ,0 ,496 ,43814 ,220602 ,526 ,0 ,0 ,44271 ,469680 ,0 ,11 ,0 ,0 ,2379091 ,25190 ,140761 ,0 ,115783 ,72133 ,20736 ,0 ,0 ,0 ,0 ,3271 ,3 ,0 ,0 ,14573 ,0 ,4 ,65941 ,219316 ,14920 ,0 ,699 ,0 ,0 ,69044 ,2526 ,100433 ,330 ,0 ,117054 ,41122 ,71 ,0 ,0 ,5329 ,6875 ,133 ,1421 ,2381 ,4767 ,344 ,7431 ,12 ,27876 ,1096 ,0 ,647012 ,0 ,1326 ,104672 ,0 ,0 ,8171 ,55676 ,159872 ,31061 ,0 ,9160 ,0 ,25050 ,8424 ,180962 ,11733 ,21457 ,1742120 ,49 ,0 
+LK,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5971 ,0 ,0 ,0 ,0 ,0 ,0 ,4493 ,0 ,0 ,0 ,9583 ,0 ,15715 ,0 ,20816 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,17188 ,34099 ,0 ,5931 ,0 ,1857 ,495222 ,5962 ,0 ,11439 ,0 ,2950 ,0 ,0 ,10977 ,0 ,0 ,0 ,0 ,0 ,10742 ,0 ,4380 ,0 ,0 ,0 ,0 ,17435 ,0 ,0 ,0 ,0 ,19127 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10291 ,0 ,0 ,0 ,0 ,74051 ,0 ,30844 ,0 ,0 ,0 ,138 ,0 ,0 ,0 ,79 ,3282 ,0 ,0 ,2424 ,0 ,0 ,0 ,0 ,6991 ,6667 ,0 ,0 ,0 ,0 ,45788 ,0 ,0 ,0 ,0 ,3685 ,0 ,50188 ,0 ,0 ,0 ,3603 ,0 ,14698 ,0 ,0 ,0 ,0 ,318 ,0 ,916560 ,0 ,118807 ,0 ,0 ,0 ,11412 ,0 ,191 ,0 ,0 ,3492 ,606 ,0 ,0 ,0 ,0 ,0 ,14349 ,0 ,0 ,0 ,4150 ,0 ,0 ,261809 ,1170 ,6479 ,0 ,0 ,0 ,0 ,0 ,5830 ,7205 ,0 ,0 ,0 ,0 ,32147 ,0 
+SD,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,11 ,0 ,37831 ,3 ,2808 ,0 ,0 ,0 ,0 ,35462 ,0 ,336 ,0 ,0 ,0 ,5878 ,0 ,0 ,0 ,811 ,1942 ,0 ,1800 ,0 ,0 ,19567 ,0 ,6576 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,181566 ,288681 ,0 ,17887 ,0 ,35428 ,13584 ,329 ,0 ,0 ,0 ,85423 ,50348 ,3137 ,0 ,0 ,2 ,19395 ,0 ,48 ,0 ,0 ,3 ,0 ,2995127 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,27776 ,51 ,1 ,107 ,0 ,14858 ,0 ,28848 ,0 ,1593 ,259090 ,2400948 ,0 ,0 ,0 ,4 ,0 ,112 ,48 ,21 ,0 ,508 ,0 ,0 ,88038 ,17480 ,17 ,345 ,0 ,0 ,0 ,0 ,0 ,0 ,5127 ,858 ,0 ,3 ,0 ,0 ,0 ,21742 ,97941 ,2115 ,0 ,0 ,0 ,0 ,0 ,0 ,10917 ,905 ,0 ,0 ,0 ,128 ,4296946 ,6 ,5623977 ,0 ,0 ,68 ,24 ,0 ,0 ,0 ,0 ,0 ,66033 ,0 ,198174 ,0 ,20336 ,125 ,27 ,7 ,9 ,52813 ,0 ,3399 ,0 ,0 ,0 ,42000 ,23619 ,232 ,0 ,23427 ,301081 ,73811 ,0 
+SR,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,1731 ,0 ,8 ,0 ,0 ,0 ,0 ,1 ,0 ,38 ,0 ,0 ,0 ,0 ,0 ,0 ,2 ,265 ,0 ,0 ,0 ,17 ,0 ,0 ,0 ,1 ,0 ,260 ,0 ,0 ,160 ,934 ,301 ,0 ,0 ,0 ,49 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,112 ,0 ,110 ,0 ,0 ,1 ,0 ,19 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14 ,0 ,0 ,0 ,0 ,46 ,0 ,149 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,570 ,0 ,0 ,1 ,0 ,0 ,1241 ,23 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,121 ,0 ,446 ,0 ,0 ,0 ,0 ,92 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,59183 ,127 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,0 ,0 ,0 ,0 ,0 ,0 ,3115 ,0 ,0 ,0 ,47 ,1 ,14 ,0 ,0 ,84 ,0 ,16 ,0 ,0 ,0 ,687 ,964 ,0 ,0 ,103 ,0 ,0 ,0 
+SJ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+SZ,0 ,0 ,38 ,808 ,0 ,3 ,4 ,0 ,0 ,0 ,83 ,0 ,1150 ,2 ,2100 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,0 ,0 ,3 ,0 ,16 ,0 ,30 ,6 ,3 ,10 ,0 ,0 ,0 ,3 ,0 ,0 ,42 ,0 ,0 ,0 ,8 ,0 ,1892 ,2157 ,0 ,1 ,0 ,74 ,0 ,2 ,0 ,0 ,0 ,0 ,710 ,0 ,0 ,0 ,45 ,3811 ,0 ,4 ,0 ,21 ,0 ,2 ,5558 ,0 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,0 ,1 ,0 ,10 ,67038 ,0 ,25 ,0 ,1 ,0 ,92 ,0 ,566 ,0 ,0 ,0 ,2 ,18 ,0 ,0 ,33 ,0 ,0 ,13 ,5434 ,3 ,0 ,27 ,0 ,0 ,0 ,0 ,0 ,5 ,650 ,0 ,0 ,365 ,0 ,0 ,3974 ,1244 ,12 ,0 ,0 ,0 ,0 ,106 ,0 ,67 ,5699 ,0 ,16 ,0 ,0 ,2 ,3 ,1331 ,0 ,0 ,2835 ,0 ,0 ,0 ,0 ,0 ,0 ,57933 ,0 ,147 ,0 ,1363 ,68 ,0 ,5 ,346 ,326 ,0 ,1 ,0 ,0 ,0 ,934 ,1559 ,0 ,0 ,3 ,386 ,4199 ,0 
+SE,0 ,0 ,0 ,0 ,0 ,1439 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,294419 ,596 ,0 ,89 ,41 ,0 ,0 ,0 ,767 ,0 ,0 ,0 ,1804 ,0 ,0 ,0 ,0 ,0 ,721 ,0 ,180 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,230 ,279 ,0 ,0 ,0 ,0 ,0 ,0 ,17 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,55 ,0 ,0 ,1 ,4993 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1969 ,2459 ,0 ,2514 ,0 ,0 ,0 ,0 ,0 ,0 ,13703 ,66579 ,0 ,0 ,0 ,0 ,159442 ,0 ,0 ,0 ,0 ,0 ,1395 ,0 ,0 ,22238 ,0 ,112 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,41 ,0 ,0 ,24198 ,0 ,0 ,0 ,0 ,0 ,0 ,98169 ,118 ,198 ,0 ,0 ,28700 ,22 ,0 ,0 ,0 ,0 ,0 ,0 ,771 ,0 ,0 ,0 ,2094 ,0 ,29065 ,0 ,0 ,36300 ,0 ,0 ,0 ,0 ,0 ,0 ,49 ,17154 ,0 ,0 ,1 ,0 ,1308 ,145 ,0 ,0 ,0 ,404827 ,0 ,0 
+CH,0 ,0 ,487 ,38 ,0 ,3703 ,728 ,0 ,6 ,382 ,0 ,0 ,0 ,27957 ,4 ,2755 ,25 ,81 ,0 ,957 ,15 ,1068 ,26 ,0 ,6 ,2136 ,0 ,0 ,0 ,0 ,0 ,1390 ,92 ,565 ,14 ,7 ,3 ,18 ,0 ,0 ,0 ,191 ,0 ,0 ,0 ,0 ,0 ,0 ,107 ,6 ,0 ,5 ,0 ,3 ,1 ,0 ,273 ,1 ,61 ,0 ,48 ,14456 ,0 ,500 ,1304 ,5 ,277 ,204 ,1225 ,0 ,31 ,0 ,5 ,21 ,0 ,0 ,0 ,0 ,0 ,19 ,0 ,139 ,15 ,2 ,3151 ,115 ,210 ,19931 ,16254 ,0 ,0 ,5 ,0 ,221 ,260 ,18039 ,0 ,2 ,0 ,0 ,1795 ,0 ,728 ,157 ,0 ,2 ,993 ,46 ,0 ,3573 ,10 ,743 ,0 ,0 ,1 ,0 ,0 ,0 ,1 ,0 ,333 ,0 ,12 ,10958 ,810 ,598 ,0 ,12 ,0 ,0 ,24448 ,202 ,224 ,0 ,0 ,1798 ,500 ,0 ,0 ,0 ,47 ,12 ,8 ,2034 ,0 ,1010 ,0 ,517 ,28 ,17797 ,0 ,0 ,4524 ,0 ,0 ,16 ,0 ,0 ,430 ,183 ,7439 ,0 ,0 ,1 ,0 ,2743 ,2496 ,3 ,1670 ,7 ,85092 ,0 ,0 
+SY,0 ,0 ,3418 ,67436 ,76926 ,50735 ,13818 ,0 ,243 ,1 ,137 ,0 ,5 ,1328812 ,904 ,2 ,22 ,0 ,0 ,14615 ,0 ,2734 ,0 ,0 ,135 ,774 ,0 ,0 ,0 ,0 ,0 ,2097 ,1 ,28816 ,22 ,71681 ,0 ,5068 ,0 ,7480 ,0 ,411 ,0 ,0 ,0 ,36511 ,1 ,0 ,10714 ,0 ,420 ,9318 ,0 ,9479 ,0 ,0 ,1217 ,6802 ,1157 ,0 ,0 ,44334 ,1686 ,34831 ,5023 ,4493 ,22 ,3187 ,1833 ,7242 ,202 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,0 ,8515 ,16407 ,112748 ,2763 ,0 ,3 ,50034 ,3118 ,25 ,0 ,8037 ,0 ,229 ,6 ,440 ,0 ,0 ,0 ,3293 ,29 ,0 ,0 ,59 ,4637 ,617477 ,6016 ,24963 ,0 ,4840 ,6257 ,3806 ,0 ,0 ,71 ,0 ,53 ,1 ,57128 ,0 ,3718 ,0 ,99 ,27762 ,2942 ,7819 ,0 ,399 ,0 ,0 ,133 ,0 ,201 ,4 ,0 ,0 ,0 ,0 ,15546 ,0 ,669 ,0 ,8 ,2885 ,7166 ,80 ,1617 ,89 ,3 ,21802 ,20 ,0 ,4817 ,0 ,21 ,1396 ,8 ,45 ,9654 ,14512 ,0 ,62 ,0 ,0 ,0 ,8585 ,28023 ,20219 ,2826 ,22826 ,1350360 ,0 ,0 
+TW,0 ,0 ,0 ,0 ,0 ,208 ,3635 ,37645 ,0 ,580 ,0 ,0 ,14762 ,0 ,6202 ,0 ,0 ,0 ,0 ,0 ,0 ,8012 ,0 ,0 ,0 ,1838 ,0 ,0 ,0 ,0 ,0 ,3214 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4044 ,0 ,1986 ,0 ,0 ,0 ,0 ,2010 ,0 ,0 ,1331 ,0 ,0 ,0 ,0 ,14072 ,9721 ,4411 ,835 ,0 ,2481 ,4730 ,0 ,0 ,0 ,0 ,1496 ,0 ,19733 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,14802 ,2427 ,0 ,0 ,0 ,0 ,29471 ,0 ,15768 ,0 ,2256 ,0 ,298 ,0 ,0 ,14 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1318 ,5347 ,2705 ,0 ,2023 ,5157 ,0 ,0 ,4765 ,0 ,0 ,7810 ,0 ,0 ,1504 ,0 ,0 ,2632 ,0 ,2437 ,0 ,0 ,0 ,0 ,6 ,0 ,103409 ,1373 ,0 ,0 ,0 ,0 ,2224 ,0 ,1463 ,0 ,0 ,2781 ,0 ,0 ,0 ,517 ,0 ,0 ,7916 ,0 ,0 ,0 ,9795 ,0 ,2444 ,11709 ,545 ,3984 ,0 ,35378 ,0 ,0 ,0 ,14692 ,59934 ,0 ,0 ,8391 ,2052 ,2153 ,0 
+TJ,0 ,0 ,65 ,4406 ,0 ,42579 ,11398 ,0 ,0 ,0 ,0 ,0 ,0 ,70225 ,4503 ,388 ,9 ,0 ,0 ,6 ,138 ,3263 ,0 ,0 ,0 ,8551 ,0 ,0 ,0 ,0 ,0 ,1 ,6 ,25 ,0 ,3 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,196254 ,0 ,0 ,7303 ,0 ,0 ,1 ,0 ,298 ,0 ,0 ,28436 ,8840 ,864 ,0 ,0 ,32918 ,0 ,24655 ,3500 ,1 ,0 ,0 ,0 ,3257 ,816 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,346 ,524 ,0 ,4 ,0 ,13462 ,12688 ,0 ,0 ,0 ,0 ,62 ,0 ,1714 ,0 ,21 ,0 ,945 ,847 ,0 ,0 ,15 ,0 ,11 ,2133 ,110 ,0 ,9287 ,11823 ,26 ,1057 ,0 ,0 ,0 ,2 ,0 ,2 ,0 ,12907 ,0 ,0 ,46592 ,2248 ,0 ,0 ,3 ,0 ,0 ,126 ,7 ,11054 ,0 ,0 ,141 ,0 ,3330 ,778 ,0 ,23 ,0 ,1 ,61 ,1 ,0 ,0 ,5 ,0 ,8 ,0 ,0 ,4050 ,0 ,1 ,0 ,0 ,0 ,80 ,713 ,0 ,0 ,0 ,0 ,0 ,2860 ,6371 ,0 ,13 ,22496 ,244970 ,0 ,0 
+TZ,0 ,0 ,0 ,0 ,1062 ,0 ,0 ,0 ,0 ,0 ,24 ,0 ,325875 ,8364 ,634644 ,0 ,0 ,0 ,0 ,0 ,0 ,6422 ,0 ,0 ,0 ,24 ,0 ,738849 ,0 ,1030676 ,6925 ,0 ,49875 ,0 ,0 ,49374 ,0 ,470 ,0 ,13605 ,6934 ,0 ,9827 ,598956 ,198852 ,390373 ,86939 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,0 ,0 ,31704 ,1568 ,677 ,0 ,1077 ,12 ,0 ,1038 ,116 ,13620 ,0 ,5031 ,900892 ,0 ,0 ,0 ,0 ,0 ,8 ,0 ,0 ,0 ,0 ,0 ,0 ,1651 ,9 ,0 ,4 ,0 ,3281485 ,0 ,34892 ,0 ,0 ,0 ,258707 ,0 ,0 ,0 ,0 ,1584 ,5984 ,19 ,5288 ,0 ,42818 ,4 ,0 ,18710 ,34981 ,43 ,64528 ,0 ,547 ,781 ,0 ,0 ,130769 ,4927 ,14768 ,0 ,301789 ,508 ,0 ,0 ,89946 ,44644 ,210 ,14732 ,0 ,0 ,0 ,0 ,0 ,1216459 ,833 ,0 ,0 ,0 ,24393 ,869109 ,46722 ,616926 ,0 ,0 ,17663 ,12 ,9 ,0 ,0 ,0 ,0 ,51913 ,0 ,1003446 ,0 ,425240 ,0 ,559 ,21583 ,114298 ,35215 ,0 ,19794 ,5 ,0 ,0 ,97003 ,232591 ,0 ,0 ,2706 ,59350 ,913 ,0 
+TH,0 ,0 ,0 ,0 ,0 ,0 ,0 ,21865 ,0 ,1409 ,0 ,0 ,62247 ,62510 ,118564 ,0 ,0 ,0 ,0 ,0 ,0 ,11369 ,0 ,84551 ,0 ,0 ,0 ,15727 ,0 ,1303167 ,13931 ,1266 ,87374 ,0 ,0 ,810 ,0 ,1368 ,0 ,8168 ,3 ,0 ,33 ,128987 ,36804 ,2169 ,526 ,0 ,18448 ,0 ,0 ,592 ,919 ,0 ,0 ,0 ,29577 ,62531 ,11640 ,9856 ,0 ,4416 ,15355 ,1497 ,146931 ,143 ,35764 ,0 ,288 ,14383 ,0 ,0 ,0 ,0 ,14 ,28463 ,132482 ,25934 ,0 ,0 ,0 ,0 ,16702 ,0 ,2714 ,0 ,0 ,1104632 ,0 ,212740 ,0 ,189 ,0 ,1311 ,0 ,0 ,0 ,225 ,542 ,11941 ,0 ,789544 ,0 ,462 ,0 ,0 ,1685 ,23020 ,4450 ,214 ,0 ,0 ,362 ,0 ,0 ,2347 ,23388 ,69622 ,0 ,118 ,0 ,0 ,0 ,7000 ,98456 ,5752 ,0 ,0 ,0 ,39 ,1087 ,0 ,9079292 ,15328 ,2885938 ,0 ,0 ,0 ,45919 ,0 ,12565 ,0 ,0 ,19328 ,1939 ,0 ,89 ,0 ,0 ,0 ,1660745 ,124 ,31589 ,0 ,869 ,14947 ,9633 ,19525 ,20866 ,7020 ,0 ,453894 ,0 ,0 ,0 ,137562 ,92934 ,0 ,0 ,7794 ,1223 ,27285 ,0 
+TL,0 ,0 ,0 ,0 ,0 ,0 ,0 ,22 ,0 ,0 ,125 ,0 ,244 ,0 ,7761 ,0 ,0 ,0 ,0 ,0 ,0 ,352 ,0 ,0 ,0 ,5 ,0 ,61 ,0 ,3589 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,40 ,18 ,0 ,82 ,0 ,1637 ,13539 ,46674 ,5 ,0 ,0 ,126 ,0 ,0 ,10 ,0 ,0 ,0 ,0 ,0 ,20 ,314 ,4 ,0 ,0 ,0 ,0 ,653 ,0 ,20 ,0 ,0 ,2919 ,0 ,0 ,0 ,0 ,0 ,1 ,63 ,63 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,44460 ,0 ,314 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,10 ,22 ,0 ,0 ,0 ,0 ,0 ,0 ,21 ,96 ,40 ,0 ,0 ,0 ,20 ,0 ,0 ,0 ,0 ,19 ,0 ,0 ,0 ,0 ,0 ,861 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,6968 ,5505 ,353 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,796 ,253 ,8 ,0 ,0 ,0 ,0 ,100 ,18 ,0 ,0 ,3241 ,0 ,0 ,28 ,3 ,117 ,0 ,206 ,0 ,0 ,2 ,3873 ,3847 ,0 ,0 ,0 ,0 ,2543 ,0 
+TG,0 ,0 ,0 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,11580 ,1993 ,0 ,407362 ,0 ,0 ,0 ,0 ,0 ,0 ,66 ,0 ,0 ,0 ,0 ,0 ,4921 ,0 ,294480 ,936 ,0 ,4173 ,0 ,0 ,1962 ,0 ,465 ,0 ,0 ,0 ,0 ,10696 ,3600 ,39000 ,158276 ,6576 ,0 ,0 ,0 ,9 ,35 ,0 ,0 ,0 ,57 ,0 ,4223 ,0 ,1 ,0 ,0 ,0 ,0 ,41 ,0 ,0 ,2 ,0 ,61059 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3077 ,0 ,942 ,0 ,17 ,0 ,0 ,0 ,0 ,704123 ,0 ,60 ,0 ,0 ,0 ,41347 ,0 ,0 ,0 ,0 ,32 ,201 ,0 ,58751 ,0 ,8 ,664 ,0 ,112 ,3179 ,0 ,0 ,0 ,0 ,100 ,0 ,0 ,0 ,6456 ,217 ,0 ,1177 ,0 ,0 ,0 ,1 ,6806 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,90478 ,1084 ,332 ,0 ,0 ,0 ,5592 ,0 ,304920 ,0 ,0 ,3940 ,254 ,0 ,0 ,0 ,0 ,0 ,580 ,0 ,0 ,0 ,2056 ,0 ,5597 ,0 ,4407 ,1296 ,0 ,2 ,0 ,0 ,0 ,17047 ,27600 ,0 ,0 ,0 ,0 ,97489 ,0 
+TO,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,282 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,241 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1302 ,5 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,973 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,123 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,306 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,173 ,0 
+TT,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,70 ,0 ,1116 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,83 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,524 ,0 ,39 ,0 ,0 ,0 ,0 ,0 ,160 ,0 ,469 ,0 ,0 ,5032 ,2174 ,859 ,0 ,150 ,0 ,184 ,0 ,0 ,137 ,0 ,0 ,0 ,0 ,0 ,1770 ,0 ,0 ,0 ,0 ,262 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,425 ,0 ,131 ,0 ,0 ,1684 ,0 ,77 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,408 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,884 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,826 ,0 ,270 ,0 ,1350 ,0 ,0 ,0 ,0 ,126 ,448 ,0 ,0 ,0 ,0 ,0 ,0 ,1878 ,151 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,900 ,0 ,0 ,0 ,304 ,0 ,364 ,0 ,129 ,152 ,0 ,0 ,0 ,0 ,0 ,377 ,0 ,0 ,0 ,121 ,0 ,7 ,142 
+TN,0 ,0 ,12 ,133277 ,13539 ,24266 ,6914 ,0 ,3866 ,0 ,25 ,0 ,0 ,518862 ,119 ,0 ,20 ,0 ,0 ,41213 ,0 ,2202 ,0 ,0 ,396 ,10611 ,0 ,0 ,0 ,0 ,0 ,792 ,14735 ,626 ,0 ,6607 ,0 ,16941 ,0 ,11687 ,0 ,9 ,0 ,0 ,0 ,2852 ,0 ,21 ,2676 ,0 ,4260 ,43 ,0 ,12091 ,0 ,0 ,617 ,15140 ,2244 ,0 ,0 ,18301 ,4241 ,0 ,306 ,6939 ,0 ,9235 ,10295 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3127 ,1939 ,2807 ,1039 ,0 ,0 ,11 ,0 ,0 ,9015 ,0 ,0 ,0 ,27831 ,0 ,0 ,0 ,0 ,4908 ,0 ,0 ,0 ,0 ,2337514 ,6037 ,17491 ,0 ,5184 ,13683 ,4891 ,0 ,0 ,0 ,0 ,2439 ,0 ,22369 ,0 ,3487 ,0 ,0 ,25383 ,28639 ,3180 ,0 ,386 ,0 ,0 ,5112 ,0 ,1 ,0 ,0 ,0 ,192 ,0 ,0 ,0 ,2364 ,0 ,0 ,0 ,3002 ,638 ,577 ,381 ,0 ,1543 ,0 ,0 ,7305 ,0 ,0 ,8535 ,0 ,0 ,1206 ,22209 ,8168 ,11320 ,0 ,0 ,0 ,5451 ,8614 ,70 ,0 ,5752 ,600936 ,0 ,0 
+TR,0 ,0 ,225204 ,50925 ,72086 ,168721 ,130046 ,0 ,3007 ,273 ,1143 ,0 ,10855 ,3089251 ,102795 ,2827 ,3330 ,0 ,0 ,3648 ,0 ,27426 ,0 ,4278 ,954 ,9908 ,0 ,0 ,0 ,0 ,0 ,13521 ,248 ,80074 ,13915 ,509607 ,0 ,90923 ,0 ,251 ,0 ,6 ,0 ,0 ,0 ,345700 ,4 ,585 ,38611 ,0 ,3591 ,23612 ,0 ,53815 ,8 ,0 ,1866 ,27796 ,3212 ,0 ,0 ,400304 ,4977 ,2330 ,39629 ,5778 ,0 ,8197 ,10890 ,53453 ,717151 ,0 ,9 ,2 ,0 ,0 ,0 ,0 ,0 ,3214 ,0 ,213814 ,45714 ,246961 ,23720 ,219 ,3 ,664917 ,26672 ,2 ,0 ,76760 ,11 ,1876 ,9044 ,87 ,0 ,10 ,0 ,1099 ,112863 ,0 ,0 ,15 ,7824 ,851748 ,70483 ,45773 ,0 ,560 ,46106 ,26263 ,0 ,0 ,0 ,0 ,7064 ,0 ,358899 ,0 ,21413 ,0 ,35392 ,147846 ,3515 ,112919 ,0 ,7792 ,0 ,0 ,34379 ,4 ,121156 ,0 ,0 ,104234 ,0 ,13095 ,25994 ,0 ,1 ,5 ,20435 ,34599 ,48379 ,18523 ,271 ,17664 ,9379 ,335838 ,55 ,0 ,705578 ,0 ,1 ,58579 ,0 ,83090 ,75358 ,182433 ,43753 ,8204 ,0 ,0 ,0 ,15512 ,32016 ,1640 ,138515 ,79347 ,6940015 ,0 ,0 
+TM,0 ,0 ,525 ,1555 ,29 ,6181 ,2693 ,0 ,1 ,1 ,0 ,0 ,21 ,19587 ,69 ,0 ,22 ,0 ,0 ,3 ,0 ,4219 ,0 ,0 ,0 ,2127 ,0 ,0 ,0 ,0 ,0 ,1 ,2 ,28 ,0 ,234 ,0 ,3 ,0 ,6 ,0 ,0 ,0 ,0 ,0 ,533176 ,0 ,0 ,1428 ,0 ,198 ,6 ,0 ,43 ,0 ,0 ,271 ,87 ,303 ,0 ,0 ,19091 ,2 ,0 ,1 ,1 ,0 ,0 ,1 ,23 ,11 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,55 ,238 ,3 ,2 ,0 ,44344 ,21868 ,1 ,0 ,80 ,0 ,38 ,0 ,56649 ,0 ,0 ,0 ,400 ,0 ,0 ,0 ,0 ,0 ,17 ,3471 ,124 ,0 ,6977 ,2133 ,21 ,0 ,0 ,0 ,0 ,2 ,0 ,61 ,0 ,1828 ,0 ,0 ,16159 ,69 ,45 ,0 ,4 ,0 ,0 ,605 ,0 ,130612 ,0 ,0 ,1 ,0 ,7 ,56 ,0 ,1 ,0 ,9 ,148 ,0 ,0 ,37 ,3 ,0 ,14718 ,1 ,0 ,174 ,0 ,0 ,44 ,0 ,34 ,1498 ,10456 ,0 ,0 ,0 ,0 ,0 ,1943 ,1769 ,0 ,59 ,25723 ,789251 ,0 ,0 
+AE,0 ,0 ,915 ,35 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,13 ,9 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,421 ,0 ,0 ,0 ,18 ,0 ,0 ,0 ,0 ,0 ,382 ,71 ,0 ,0 ,0 ,0 ,103 ,0 ,242 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,486 ,0 ,20578 ,488 ,0 ,67 ,0 ,0 ,0 ,208 ,0 ,0 ,0 ,14 ,0 ,1078 ,96 ,0 ,0 ,838 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,291 ,0 ,21 ,0 ,0 ,497 ,0 ,283 ,0 ,174 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,65 ,0 ,13 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,167 ,0 ,620 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,894 ,0 ,0 ,0 ,0 ,127 ,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,20 ,733 ,0 ,0 ,0 ,0 ,0 ,964 ,762 ,0 ,0 ,116 ,7 ,0 ,0 
+GB,0 ,0 ,0 ,0 ,0 ,15340 ,0 ,0 ,0 ,2290 ,0 ,0 ,0 ,1365376 ,0 ,9438 ,1514 ,0 ,0 ,169332 ,0 ,9173 ,18087 ,0 ,0 ,13805 ,0 ,0 ,0 ,0 ,0 ,17872 ,0 ,744 ,0 ,0 ,0 ,79 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,110 ,2649 ,0 ,0 ,0 ,0 ,10308 ,0 ,0 ,5 ,0 ,0 ,266 ,464 ,0 ,0 ,3480 ,2095 ,0 ,1582 ,41848 ,0 ,0 ,0 ,0 ,317 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4811 ,34029 ,0 ,830522 ,97992 ,0 ,0 ,0 ,0 ,0 ,8494 ,147791 ,0 ,0 ,0 ,0 ,181283 ,0 ,0 ,0 ,0 ,0 ,9055 ,0 ,0 ,52571 ,0 ,1492 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,549 ,0 ,0 ,141954 ,51085 ,0 ,0 ,0 ,0 ,0 ,379475 ,1410 ,28 ,0 ,0 ,26962 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1111 ,0 ,0 ,0 ,4805 ,0 ,111214 ,0 ,0 ,31057 ,0 ,0 ,0 ,0 ,0 ,0 ,191 ,10718 ,0 ,0 ,32646 ,0 ,42103 ,13485 ,0 ,0 ,0 ,1373483 ,0 ,0 
+US,0 ,32 ,8452034 ,513638 ,87 ,121691 ,3165 ,0 ,2132 ,7182 ,21522 ,0 ,329 ,867086 ,673715 ,0 ,3357 ,38453 ,0 ,41 ,72770 ,22728 ,0 ,16 ,0 ,27832 ,0 ,11 ,0 ,0 ,7 ,53498 ,0 ,35893 ,0 ,108252 ,0 ,19132 ,0 ,982 ,0 ,66091 ,0 ,0 ,2729 ,3575055 ,7817 ,14991 ,36569 ,0 ,5618 ,2404 ,174 ,2034 ,0 ,0 ,75 ,0 ,10053 ,0 ,0 ,374448 ,17211 ,1159 ,10120 ,0 ,154629 ,439 ,53870 ,654415 ,24011 ,0 ,0 ,23953 ,0 ,0 ,0 ,0 ,0 ,1690 ,0 ,0 ,20298 ,211358 ,96983 ,119948 ,0 ,33555900 ,460244 ,43 ,0 ,18739 ,0 ,192789 ,597 ,3131211 ,0 ,36880 ,0 ,166767 ,414659 ,0 ,0 ,0 ,1286 ,14922 ,54004 ,206754 ,226 ,395759 ,29555 ,17724 ,5 ,24807 ,203 ,0 ,4 ,0 ,153462 ,0 ,21833 ,76311 ,0 ,371861 ,0 ,43577 ,0 ,10 ,0 ,0 ,732437 ,6468 ,1204163 ,10 ,42 ,137696 ,174453 ,52019 ,0 ,163 ,2056464 ,275034 ,12442 ,33411560 ,0 ,21750 ,0 ,16615 ,49839 ,462569 ,386169 ,0 ,663392 ,0 ,62986 ,20915 ,0 ,0 ,78764 ,110487 ,330003 ,0 ,0 ,341 ,0 ,17121 ,13615 ,2060 ,155676 ,37847 ,13910450 ,7 ,0 
+UG,0 ,0 ,0 ,0 ,2 ,2 ,0 ,0 ,0 ,0 ,78 ,0 ,79982 ,13 ,228057 ,0 ,2 ,0 ,0 ,108 ,0 ,538 ,0 ,0 ,0 ,58 ,0 ,125 ,0 ,1231765 ,3002 ,1 ,22 ,0 ,0 ,8499 ,0 ,11 ,0 ,232 ,30 ,0 ,70651 ,1 ,523688 ,94303 ,27125 ,0 ,14 ,0 ,68 ,24 ,0 ,0 ,0 ,0 ,282 ,7942 ,6 ,45 ,0 ,3 ,35 ,0 ,89 ,0 ,8 ,0 ,99 ,198071 ,0 ,0 ,0 ,0 ,0 ,23 ,0 ,0 ,0 ,0 ,0 ,0 ,12 ,36 ,2 ,11 ,0 ,561871 ,0 ,300 ,0 ,2 ,235 ,98044 ,0 ,0 ,0 ,0 ,4 ,42 ,48 ,3166 ,0 ,43899 ,11 ,0 ,77425 ,105 ,132 ,26666 ,0 ,9 ,1845 ,0 ,0 ,26115 ,4121 ,405 ,0 ,942943 ,10 ,0 ,0 ,29181 ,1066 ,711 ,230 ,0 ,0 ,0 ,0 ,0 ,67885 ,60 ,86 ,0 ,0 ,16 ,199638 ,2 ,172121 ,0 ,0 ,30397 ,26 ,23 ,0 ,0 ,0 ,0 ,80052 ,0 ,273873 ,0 ,207687 ,0 ,312 ,29556 ,22472 ,6179 ,0 ,113 ,0 ,0 ,344 ,48196 ,149537 ,0 ,0 ,16 ,16151 ,260 ,0 
+UA,0 ,0 ,1929 ,1676 ,2671 ,88517 ,7460 ,0 ,0 ,3 ,0 ,0 ,0 ,2238287 ,47139 ,40870 ,1584 ,100 ,0 ,2740 ,89747 ,69447 ,0 ,62 ,0 ,43243 ,0 ,0 ,0 ,0 ,190 ,1499 ,5352 ,10220 ,74 ,125 ,142 ,15756 ,0 ,0 ,0 ,806 ,0 ,0 ,0 ,0 ,0 ,200 ,54633 ,3940 ,0 ,5164 ,0 ,0 ,337 ,0 ,112687 ,328 ,23702 ,0 ,911 ,38717 ,0 ,1830 ,135 ,0 ,5223 ,1710 ,6248 ,0 ,200 ,1522 ,1178 ,420 ,0 ,51 ,0 ,0 ,0 ,0 ,0 ,3200 ,0 ,1210 ,91 ,14335 ,4239 ,4912281 ,528030 ,0 ,0 ,15302 ,0 ,157020 ,3003 ,530081 ,0 ,23626 ,0 ,34 ,203651 ,0 ,0 ,14431 ,0 ,0 ,55208 ,0 ,0 ,236678 ,2885 ,11989 ,0 ,0 ,0 ,0 ,179 ,0 ,0 ,0 ,18042 ,0 ,35 ,1329003 ,11107 ,61803 ,0 ,632 ,0 ,0 ,1108656 ,5284 ,11196 ,0 ,0 ,142350 ,0 ,186 ,0 ,0 ,46809 ,0 ,19914 ,1343121 ,2 ,17 ,1828 ,8091 ,0 ,221634 ,0 ,0 ,5823229 ,0 ,0 ,0 ,0 ,2 ,523 ,76023 ,2880 ,0 ,0 ,20 ,0 ,25025 ,49009 ,3260 ,13454 ,47060 ,6561394 ,0 ,0 
+UY,0 ,0 ,11 ,0 ,0 ,2386 ,0 ,0 ,0 ,0 ,0 ,0 ,5 ,138451 ,5135 ,0 ,0 ,0 ,0 ,343 ,11 ,375 ,0 ,3582 ,0 ,1122 ,0 ,0 ,142 ,477 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,246 ,0 ,0 ,0 ,14 ,0 ,0 ,0 ,266 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,628 ,184 ,0 ,0 ,6348 ,93 ,262 ,346 ,0 ,206 ,0 ,1 ,3412 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,3068 ,0 ,0 ,4027 ,0 ,115885 ,20 ,0 ,0 ,136 ,0 ,3 ,0 ,0 ,0 ,0 ,0 ,0 ,22116 ,0 ,0 ,0 ,0 ,2917 ,1499 ,6586 ,0 ,1270 ,1328 ,697 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,263 ,0 ,0 ,3863 ,0 ,2359 ,0 ,222 ,0 ,0 ,56749 ,0 ,111624 ,0 ,0 ,8 ,0 ,0 ,5 ,0 ,24246 ,36 ,0 ,927628 ,0 ,0 ,0 ,0 ,0 ,0 ,6617 ,0 ,15688 ,0 ,8263 ,5689 ,0 ,0 ,818 ,467 ,0 ,0 ,3 ,0 ,0 ,2177 ,2361 ,0 ,0 ,679 ,197385 ,8 ,0 
+UZ,0 ,0 ,399 ,3289 ,0 ,107932 ,41569 ,0 ,122 ,0 ,0 ,0 ,0 ,107948 ,4 ,30 ,91 ,94 ,0 ,2872 ,133 ,12581 ,0 ,0 ,0 ,2050 ,0 ,1 ,0 ,0 ,0 ,3 ,3944 ,12093 ,0 ,4466 ,0 ,819 ,0 ,635 ,0 ,0 ,0 ,0 ,0 ,956010 ,0 ,0 ,23021 ,85 ,0 ,682 ,0 ,127 ,0 ,0 ,4112 ,17653 ,7136 ,0 ,0 ,16612 ,138 ,1967 ,537 ,200 ,0 ,0 ,786 ,1520 ,2872 ,0 ,0 ,0 ,1787 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,896 ,1118 ,314 ,2996 ,0 ,48368 ,93273 ,0 ,0 ,49 ,0 ,927 ,0 ,114555 ,0 ,87 ,0 ,309 ,564 ,0 ,0 ,786 ,0 ,129 ,34399 ,5 ,0 ,1194 ,17365 ,6805 ,306 ,0 ,0 ,0 ,1695 ,0 ,2172 ,0 ,12320 ,0 ,0 ,91792 ,12432 ,6 ,0 ,4909 ,0 ,0 ,1751 ,18 ,47115 ,0 ,0 ,947 ,0 ,18091 ,8848 ,0 ,588 ,0 ,4666 ,946 ,470 ,0 ,0 ,1182 ,0 ,602 ,0 ,0 ,9847 ,0 ,0 ,110 ,0 ,0 ,2340 ,57265 ,0 ,0 ,0 ,0 ,0 ,37697 ,11750 ,0 ,4859 ,34897 ,1351186 ,0 ,0 
+VU,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,622 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2728 ,81186 ,43 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,747 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1341 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,275 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,366 ,0 ,0 ,0 ,0 ,451 ,0 
+VE,0 ,55 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,2 ,10916 ,0 ,49164 ,0 ,85349 ,0 ,0 ,0 ,0 ,1 ,0 ,3905 ,0 ,0 ,0 ,9115 ,0 ,0 ,0 ,36354 ,0 ,1059 ,0 ,0 ,0 ,0 ,0 ,9920 ,0 ,0 ,0 ,0 ,52027 ,15668 ,164305 ,2100 ,1 ,0 ,997 ,0 ,0 ,1362 ,0 ,0 ,0 ,0 ,0 ,5491 ,1335 ,0 ,0 ,1116 ,987 ,0 ,1 ,0 ,0 ,1196 ,77 ,942 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6739 ,11 ,2768 ,0 ,0 ,409094 ,0 ,6816 ,0 ,8034 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,6 ,44606 ,0 ,0 ,1 ,0 ,8746 ,28046 ,4136 ,114 ,1164 ,2 ,0 ,0 ,0 ,2573 ,0 ,21894 ,0 ,61581 ,3 ,0 ,0 ,25409 ,0 ,5165 ,0 ,0 ,0 ,0 ,0 ,0 ,113157 ,4388 ,0 ,0 ,0 ,0 ,39639 ,752 ,15580 ,0 ,0 ,7407 ,0 ,133 ,0 ,549 ,151 ,1164 ,50411 ,0 ,4238 ,0 ,1909 ,9009 ,1 ,0 ,1818 ,9268 ,0 ,4991 ,0 ,0 ,0 ,7482 ,6864 ,0 ,0 ,7400 ,239 ,5242 ,7430 
+VN,0 ,0 ,0 ,5 ,6393 ,284 ,5 ,28 ,2 ,380 ,2 ,0 ,128997 ,286 ,134572 ,0 ,11997 ,0 ,0 ,289 ,263 ,36137 ,0 ,0 ,0 ,134 ,0 ,265818 ,0 ,522799 ,7776 ,7410 ,1 ,0 ,59 ,2 ,0 ,269 ,78900 ,36 ,0 ,0 ,0 ,152549 ,631892 ,137 ,0 ,0 ,486 ,0 ,2 ,307 ,12434 ,0 ,56 ,0 ,2113 ,236772 ,232 ,11 ,0 ,1027 ,55697 ,0 ,64 ,5 ,0 ,7 ,76 ,166105 ,4 ,28 ,6 ,4 ,170 ,2 ,0 ,0 ,0 ,0 ,0 ,0 ,69 ,48 ,140 ,284 ,0 ,928838 ,0 ,100458 ,0 ,213 ,16 ,1285 ,0 ,0 ,3 ,17 ,191 ,3286 ,95 ,24977 ,0 ,0 ,0 ,0 ,93639 ,72386 ,1 ,219 ,175 ,321 ,103738 ,0 ,160 ,0 ,43536 ,37726 ,8 ,0 ,442 ,0 ,0 ,19242 ,160455 ,104 ,0 ,3 ,0 ,70 ,872 ,0 ,3436772 ,45 ,670428 ,131 ,0 ,11 ,32787 ,4 ,17 ,0 ,0 ,45916 ,11 ,213 ,34 ,0 ,0 ,0 ,187937 ,0 ,2 ,0 ,110328 ,604 ,49 ,107573 ,12664 ,365 ,41 ,173 ,75 ,0 ,0 ,151380 ,791537 ,0 ,96 ,57505 ,640 ,67 ,0 
+VI,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+EH,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,219 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 
+YE,0 ,0 ,17369 ,5499 ,0 ,2089 ,698 ,0 ,0 ,0 ,0 ,0 ,9418 ,28792 ,1563 ,0 ,0 ,0 ,0 ,4721 ,0 ,747 ,0 ,0 ,0 ,1529 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19709 ,0 ,2857 ,0 ,35 ,0 ,0 ,0 ,0 ,37121 ,9678 ,0 ,0 ,937 ,0 ,15035 ,593 ,0 ,528 ,0 ,0 ,85 ,8573 ,471 ,0 ,0 ,12264 ,0 ,13988 ,451 ,0 ,0 ,0 ,0 ,1513 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2393 ,9459 ,296 ,0 ,0 ,37154 ,0 ,23610 ,0 ,3548 ,0 ,84063 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4267 ,0 ,15719 ,8128 ,1689 ,1585 ,2654 ,142 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,15733 ,10427 ,1511 ,0 ,315 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,20127 ,0 ,285030 ,24317 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,41 ,1507 ,0 ,0 ,13623 ,7326 ,0 ,450 ,0 ,0 ,0 ,4852 ,3036 ,0 ,0 ,9462 ,53187 ,0 ,0 
+ZM,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,35 ,22 ,164 ,1245 ,8321 ,0 ,0 ,0 ,0 ,0 ,0 ,94 ,0 ,0 ,0 ,0 ,0 ,311 ,0 ,138996 ,35 ,0 ,40 ,0 ,0 ,336 ,0 ,0 ,0 ,48 ,26 ,0 ,37 ,798 ,7275 ,70601 ,2438 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5703 ,1 ,0 ,0 ,6 ,7 ,0 ,1 ,0 ,15 ,20 ,2 ,195548 ,0 ,0 ,0 ,0 ,0 ,56 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,14 ,1 ,0 ,0 ,1320334 ,0 ,302 ,0 ,0 ,401 ,64095 ,0 ,0 ,0 ,0 ,10 ,77 ,0 ,1 ,0 ,318 ,0 ,0 ,2531 ,926 ,76 ,482 ,0 ,0 ,72 ,0 ,0 ,2687 ,601 ,69 ,0 ,1036 ,0 ,0 ,0 ,2657 ,60934 ,14 ,23 ,0 ,0 ,0 ,0 ,0 ,24733 ,72 ,150 ,0 ,0 ,28 ,290 ,119 ,34704 ,0 ,0 ,208608 ,2641 ,0 ,0 ,0 ,0 ,0 ,46284 ,0 ,95467 ,0 ,52097 ,0 ,73 ,690 ,15762 ,2631 ,0 ,18664 ,102 ,0 ,2 ,32046 ,50247 ,0 ,0 ,0 ,25906 ,35 ,0 
+ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0 ,0 ,2 ,29 ,0 ,0 ,0 ,11 ,0 ,315 ,0 ,54654 ,20 ,0 ,1766 ,0 ,0 ,121 ,7 ,0 ,0 ,89 ,0 ,0 ,0 ,6 ,2105 ,110119 ,2210 ,0 ,86 ,0 ,0 ,0 ,4 ,1 ,0 ,0 ,0 ,586 ,0 ,0 ,0 ,408 ,910 ,0 ,659 ,0 ,1701 ,0 ,358 ,155734 ,0 ,0 ,0 ,1 ,4118 ,40 ,0 ,0 ,0 ,0 ,0 ,0 ,2583 ,0 ,24 ,0 ,25 ,1030889 ,0 ,723 ,0 ,22 ,0 ,137028 ,0 ,460 ,0 ,0 ,0 ,3036 ,273 ,0 ,0 ,22630 ,0 ,0 ,215 ,13209 ,13 ,1 ,188 ,103 ,1421 ,0 ,0 ,0 ,9847 ,18 ,0 ,0 ,73 ,0 ,0 ,2453 ,5678 ,32 ,0 ,0 ,0 ,0 ,0 ,40 ,3299 ,123 ,0 ,40 ,0 ,0 ,40 ,23 ,220996 ,0 ,0 ,33560 ,571 ,0 ,6 ,42 ,0 ,0 ,46514 ,0 ,24528 ,0 ,8866 ,1661 ,0 ,2709 ,105190 ,3275 ,0 ,173 ,0 ,0 ,19 ,17463 ,27094 ,0 ,0 ,7 ,73180 ,170 ,0 
+    </script>
+
+    <script>
+        // 初始化图标
+        try { lucide.createIcons(); } catch (e) { console.warn("Lucide icons pending."); }
+
+        // --- Gemini API 配置与逻辑 ---
+        const apiKey = ""; // 执行环境会在运行时自动提供此密钥
+        const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        
+        // 缓存对象，防止多次点击重复调用 API
+        const aiCache = {};
+        
+        // 气象数据缓存
+        let liveWeatherData = null;
+
+        const delay = ms => new Promise(res => setTimeout(res, ms));
+        
+        // 带指数退避重试的 fetch 函数
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            const delays = [1000, 2000, 4000, 8000, 16000];
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const res = await fetch(url, options);
+                    if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                    return await res.json();
+                } catch (err) {
+                    if (i === maxRetries - 1) throw err;
+                    await delay(delays[i]);
+                }
+            }
+        }
+
+        async function generateCropDataWithAI(cropName, countryName) {
+            const prompt = `你是一个资深的农业专家和农业历史学家。请提供关于在 ${countryName} 种植的作物 "${cropName}" 的病害、防治以及历史事件的信息。
+            请必须返回严格且合法的 JSON 格式数据，不需要 Markdown 代码块包裹，结构如下：
+            {
+                "stages": ["生长期1名称", "生长期2名称", "生长期3名称", "生长期4名称(如成熟/储藏)"],
+                "diseases": ["阶段1易发病虫害", "阶段2易发病虫害", "阶段3易发病虫害", "阶段4易发病虫害"],
+                "prevention": ["阶段1详细防治建议", "阶段2详细防治建议", "阶段3详细防治建议", "阶段4详细防治建议"],
+                "history": {
+                    "title": "关于该作物的一个著名真实历史病害事件标题",
+                    "content": "该历史事件的详细科普描述（约100-150字）"
+                }
+            }`;
+
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { responseMimeType: "application/json" }
+            };
+
+            const result = await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            const textResponse = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!textResponse) throw new Error("Gemini returned no text.");
+            return JSON.parse(textResponse);
+        }
+
+        // --- 数据字典与配置 ---
+        const cropTranslations = {
+            'abaca': '蕉麻', 'agave': '龙舌兰', 'alfalfa': '紫花苜蓿', 'almond': '扁桃仁', 'aniseetc': '茴香类',
+            'apple': '苹果', 'apricot': '杏', 'areca': '槟榔', 'artichoke': '洋蓟', 'asparagus': '芦笋',
+            'avocado': '牛油果', 'bambara': '班巴拉豆', 'banana': '香蕉', 'barley': '大麦', 'bean': '豆类',
+            'beetfor': '饲用甜菜', 'berrynes': '其他浆果', 'blueberry': '蓝莓', 'brazil': '巴西坚果', 'broadbean': '蚕豆',
+            'buckwheat': '荞麦', 'cabbage': '卷心菜', 'cabbagefor': '饲用卷心菜', 'canaryseed': '金丝雀草籽', 'carob': '角豆',
+            'carrot': '胡萝卜', 'carrotfor': '饲用胡萝卜', 'cashew': '腰果', 'cashewapple': '腰果梨', 'cassava': '木薯',
+            'castor': '蓖麻', 'cauliflower': '花椰菜', 'cerealnes': '其他谷物', 'cherry': '樱桃', 'chestnut': '栗子',
+            'chickpea': '鹰嘴豆', 'chicory': '菊苣', 'chilleetc': '辣椒类', 'cinnamon': '肉桂', 'citrusnes': '其他柑橘',
+            'clove': '丁香', 'clover': '三叶草', 'cocoa': '可可', 'coconut': '椰子', 'coffee': '咖啡',
+            'cotton': '棉花', 'cowpea': '豇豆', 'cranberry': '蔓越莓', 'cucumberetc': '黄瓜类', 'currant': '醋栗',
+            'date': '椰枣', 'eggplant': '茄子', 'fibrenes': '其他纤维作物', 'fig': '无花果', 'flax': '亚麻',
+            'fonio': '福尼奥米', 'fornes': '其他饲料作物', 'fruitnes': '其他水果', 'garlic': '大蒜', 'ginger': '生姜',
+            'gooseberry': '鹅莓', 'grape': '葡萄', 'grapefruitetc': '葡萄柚类', 'grassnes': '其他草类', 'greenbean': '四季豆',
+            'greenbroadbean': '鲜蚕豆', 'greencorn': '甜玉米', 'greenonion': '青葱', 'greenpea': '青豌豆', 'groundnut': '花生',
+            'hazelnut': '榛子', 'hemp': '大麻', 'hempseed': '大麻籽', 'hop': '啤酒花', 'jute': '黄麻',
+            'jutelikefiber': '类黄麻纤维', 'kapokfiber': '木棉纤维', 'kapokseed': '木棉籽', 'karite': '乳木果', 'kiwi': '猕猴桃',
+            'kolanut': '可乐果', 'legumenes': '其他豆类', 'lemonlime': '柠檬与青柠', 'lentil': '扁豆', 'lettuce': '生菜',
+            'linseed': '亚麻籽', 'lupin': '羽扇豆', 'maize': '玉米', 'maizefor': '饲用玉米', 'mango': '芒果',
+            'mate': '马黛茶', 'melonetc': '瓜类', 'melonseed': '瓜子', 'millet': '小米', 'mixedgrain': '混合谷物',
+            'mixedgrass': '混合草类', 'mushroom': '蘑菇', 'mustard': '芥末', 'nutmeg': '肉豆蔻', 'nutnes': '其他坚果',
+            'oats': '燕麦', 'oilpalm': '油棕', 'oilseedfor': '饲用油籽', 'oilseednes': '其他油籽', 'okra': '秋葵',
+            'olive': '橄榄', 'onion': '洋葱', 'orange': '橙子', 'papaya': '木瓜', 'pea': '豌豆',
+            'peachetc': '桃类', 'pear': '梨', 'pepper': '胡椒', 'peppermint': '薄荷', 'persimmon': '柿子',
+            'pigeonpea': '木豆', 'pimento': '众香子', 'pineapple': '菠萝', 'pistachio': '开心果', 'plantain': '大蕉',
+            'plum': '李子', 'popcorn': '爆裂玉米', 'poppy': '罂粟', 'potato': '马铃薯', 'pulsenes': '其他豆荚',
+            'pumpkinetc': '南瓜类', 'pyrethrum': '除虫菊', 'quince': '温柏', 'quinoa': '藜麦', 'ramie': '苎麻',
+            'rapeseed': '油菜籽', 'rasberry': '覆盆子', 'rice': '水稻', 'rootnes': '其他块根', 'rubber': '橡胶',
+            'rye': '黑麦', 'ryefor': '饲用黑麦', 'safflower': '红花', 'sesame': '芝麻', 'sisal': '剑麻',
+            'sorghum': '高粱', 'sorghumfor': '饲用高粱', 'sourcherry': '酸樱桃', 'soybean': '大豆', 'spicenes': '其他香料',
+            'spinach': '菠菜', 'stonefruitnes': '其他核果', 'strawberry': '草莓', 'stringbean': '菜豆', 'sugarbeet': '甜菜',
+            'sugarcane': '甘蔗', 'sugarnes': '其他糖料作物', 'sunflower': '向日葵', 'swedefor': '饲用甘蓝', 'sweetpotato': '红薯',
+            'tangetc': '橘子类', 'taro': '芋头', 'tea': '茶', 'tobacco': '烟草', 'tomato': '西红柿',
+            'triticale': '小黑麦', 'tropicalnes': '其他热带水果', 'tung': '油桐', 'turnipfor': '饲用芜菁', 'vanilla': '香草',
+            'vegetablenes': '其他蔬菜', 'vegfor': '饲用蔬菜', 'vetch': '野豌豆', 'walnut': '核桃', 'watermelon': '西瓜',
+            'wheat': '小麦', 'yam': '山药', 'yautia': '箭叶芋'
+        };
+
+        const cropDetailsMockFallback = {
+            'default': {
+                stages: ["生长期 I", "生长期 II", "生长期 III", "成熟期"],
+                diseases: ["幼苗根腐 / 常见害虫", "叶部真菌病害", "花果期病原菌", "采后腐烂 / 储藏病害"],
+                prevention: ["加强田间管理，确保底肥充足，使用包衣种子。","定期巡查，保持良好通风，发现病叶及时摘除并喷洒广谱杀菌剂。","关键生殖生长期需注意营养补充，针对性用药保护花果。","适时采收，避免机械损伤，保持储藏环境干燥通风。"],
+                history: { title: "植物病害与农业的拉锯战", content: "自人类一万年前开始农业驯化以来，植物病原体（真菌、细菌、病毒）就一直与农作物进行着进化的军备竞赛。由于网络原因，AI 专家未能就绪，以上为通用建议。" }
+            }
+        };
+
+        // --- 状态管理 ---
+        let cropDataByCountry = {}; 
+        let countriesGeoJson = null;
+        let myGlobe = null;
+        let selectedCountryIso2 = null; 
+        let hoverCountryIso2 = null;
+        let currentGlobeMode = 'abstract';
+        
+        // --- 贴图常量 (全部替换为 jsdelivr 防止图片被墙导致黑屏) ---
+        const WATER_IMG = 'https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-water.png';
+        const MARBLE_IMG = 'https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-blue-marble.jpg';
+
+        // --- 工具函数：获取国家近似地理中心 ---
+        function getCountryCenter(feature) {
+            let largestPoly = feature.geometry.coordinates[0];
+            if (feature.geometry.type === 'MultiPolygon') {
+                largestPoly = feature.geometry.coordinates.reduce((prev, current) => 
+                    (prev[0].length > current[0].length) ? prev : current
+                );
+            }
+            const ring = feature.geometry.type === 'Polygon' ? feature.geometry.coordinates[0] : largestPoly[0];
+            let sumLat = 0, sumLng = 0, count = 0;
+            // 采样加速
+            for (let i = 0; i < ring.length; i += Math.max(1, Math.ceil(ring.length / 20))) {
+                sumLng += ring[i][0];
+                sumLat += ring[i][1];
+                count++;
+            }
+            return { lat: sumLat/count, lng: sumLng/count };
+        }
+
+        // --- WMO 气象代码转 Emoji ---
+        function getWeatherEmoji(code) {
+            if (code === 0) return '☀️'; // 晴朗
+            if (code === 1 || code === 2 || code === 3) return '⛅'; // 多云
+            if (code >= 45 && code <= 48) return '🌫️'; // 雾
+            if (code >= 51 && code <= 67) return '🌧️'; // 阵雨/雨
+            if (code >= 71 && code <= 77) return '❄️'; // 雪
+            if (code >= 80 && code <= 82) return '🌦️'; // 阵雨
+            if (code >= 85 && code <= 86) return '🌨️'; // 阵雪
+            if (code >= 95) return '⛈️'; // 雷暴
+            return '☁️';
+        }
+
+        // --- 初始化与主流程 ---
+        async function init() {
+            try {
+                renderRecentCountries();
+
+                const csvString = document.getElementById('builtinCsvData').textContent.trim();
+                const parseResults = Papa.parse(csvString, { header: true, dynamicTyping: true });
+                
+                const rawData = {};
+                parseResults.data.forEach(row => {
+                    let iso2 = row['Country ISO2 code'];
+                    if (!iso2) return;
+                    
+                    if (iso2 === 'TW') iso2 = 'CN';
+                    
+                    if (!rawData[iso2]) rawData[iso2] = {};
+                    
+                    for (let key in row) {
+                        if (key !== 'Country ISO2 code' && typeof row[key] === 'number') {
+                            rawData[iso2][key] = (rawData[iso2][key] || 0) + row[key];
+                        }
+                    }
+                });
+
+                for (let iso2 in rawData) {
+                    const crops = {};
+                    for (let key in rawData[iso2]) {
+                        if (rawData[iso2][key] > 3000) {
+                            crops[key] = rawData[iso2][key];
+                        }
+                    }
+                    if (Object.keys(crops).length > 0) {
+                        cropDataByCountry[iso2] = crops;
+                    }
+                }
+
+                // 3. 多备用 CDN 尝试获取 GeoJSON，增强稳定性，增加 jsdelivr 优先级
+                const geoJsonUrls = [
+                    'https://cdn.jsdelivr.net/npm/three-globe/example/datasets/ne_110m_admin_0_countries.geojson',
+                    'https://raw.githubusercontent.com/vasturiano/globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson',
+                    'https://unpkg.com/three-globe/example/datasets/ne_110m_admin_0_countries.geojson'
+                ];
+
+                for (const url of geoJsonUrls) {
+                    try {
+                        document.getElementById('loadingText').innerText = `尝试加载地图数据...`;
+                        const res = await fetch(url);
+                        if (res.ok) {
+                            const data = await res.json();
+                            // 确保数据完整性
+                            if (data && data.features) {
+                                countriesGeoJson = data;
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`从 ${url} 获取地图边界数据失败，尝试下一个...`);
+                    }
+                }
+
+                if (!countriesGeoJson) throw new Error("地图边界数据(GeoJSON)全部加载失败，请检查网络连接或防火墙设置。");
+
+                countriesGeoJson.features.forEach(feat => {
+                    if (feat.properties.ISO_A2 === 'TW' || feat.properties.NAME_ZH === '台湾' || feat.properties.ADMIN === 'Taiwan') {
+                        feat.properties.ISO_A2 = 'CN';
+                        feat.properties.ADMIN = 'China';
+                    }
+                });
+
+                initGlobe();
+                document.getElementById('loading').classList.remove('active');
+                if(window.lucide) lucide.createIcons();
+
+            } catch (error) {
+                console.error("初始化失败:", error);
+                // 优化错误展示面板：直接把具体的 errorMessage 打印在界面上，方便排查
+                document.getElementById('loading').innerHTML = `
+                    <div class="bg-white p-6 rounded-xl shadow-xl text-center max-w-sm mx-auto">
+                        <i data-lucide="alert-triangle" class="w-12 h-12 text-rose-500 mx-auto mb-3"></i>
+                        <p class="text-slate-800 font-bold mb-2 text-lg">加载失败</p>
+                        <div class="text-xs text-slate-500 text-left bg-slate-50 p-3 rounded-lg border border-slate-100 break-words mb-4">
+                            ${error.message || error}
+                        </div>
+                        <button onclick="location.reload()" class="bg-emerald-500 hover:bg-emerald-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold transition-all shadow-sm">重新加载</button>
+                    </div>`;
+                if(window.lucide) lucide.createIcons();
+            }
+        }
+
+        // --- 获取实时气象数据 (Open-Meteo) ---
+        async function fetchLiveWeather() {
+            if (liveWeatherData) return; 
+            
+            document.getElementById('loadingText').innerText = "正在通过 Open-Meteo 获取全球实时气象...";
+            document.getElementById('loading').classList.add('active');
+
+            liveWeatherData = {};
+            
+            // 提取有数据的国家的近似中心点
+            const targets = countriesGeoJson.features
+                .filter(f => cropDataByCountry[f.properties.ISO_A2])
+                .map(f => {
+                    return { iso2: f.properties.ISO_A2, ...getCountryCenter(f) };
+                });
+
+            // 根据 API 限制 (每次请求最多 100 个坐标)，进行分块请求
+            const chunks = [];
+            for (let i = 0; i < targets.length; i += 100) chunks.push(targets.slice(i, i + 100));
+
+            try {
+                for (let chunk of chunks) {
+                    const lats = chunk.map(c => c.lat.toFixed(2)).join(',');
+                    const lngs = chunk.map(c => c.lng.toFixed(2)).join(',');
+                    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lngs}&current=temperature_2m,weather_code`;
+                    
+                    const res = await fetch(url);
+                    const data = await res.json();
+                    
+                    const results = Array.isArray(data) ? data : [data]; 
+                    
+                    chunk.forEach((target, index) => {
+                        const current = results[index]?.current;
+                        if (current) {
+                            liveWeatherData[target.iso2] = {
+                                iso2: target.iso2,
+                                lat: target.lat,
+                                lng: target.lng,
+                                temp: Math.round(current.temperature_2m),
+                                code: current.weather_code
+                            };
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error("气象数据获取失败:", e);
+                alert("实时气象获取失败，请检查网络");
+            }
+            
+            document.getElementById('loading').classList.remove('active');
+        }
+
+        // --- 3D 地球逻辑 ---
+        function initGlobe() {
+            const container = document.getElementById('globeViz');
+            
+            myGlobe = Globe()
+                (container)
+                .globeImageUrl(WATER_IMG)
+                .backgroundColor('#f8fafc') 
+                .polygonsData(countriesGeoJson.features)
+                .polygonsTransitionDuration(300)
+                .polygonAltitude(d => {
+                    if (d.properties.ISO_A2 === selectedCountryIso2) return 0.06;
+                    if (d.properties.ISO_A2 === hoverCountryIso2) return 0.03;
+                    return 0.01;
+                })
+                .polygonCapColor(d => {
+                    const isSelected = d.properties.ISO_A2 === selectedCountryIso2;
+                    const isHovered = d.properties.ISO_A2 === hoverCountryIso2;
+                    const hasData = !!cropDataByCountry[d.properties.ISO_A2];
+                    
+                    if (currentGlobeMode === 'abstract') {
+                        if (isSelected) return '#f59e0b'; 
+                        if (isHovered) return '#fbbf24'; 
+                        return hasData ? '#6ee7b7' : '#f1f5f9';
+                    } else if (currentGlobeMode === 'satellite') {
+                        // 真实地形模式：未选中完全透明
+                        if (isSelected) return 'rgba(245, 158, 11, 0.7)'; 
+                        if (isHovered) return 'rgba(251, 191, 36, 0.4)';
+                        return 'rgba(0, 0, 0, 0)'; 
+                    } else if (currentGlobeMode === 'weather') {
+                        // 实时气象模式：根据温度渲染热力色彩
+                        if (isSelected) return 'rgba(255, 255, 255, 0.8)';
+                        if (isHovered) return 'rgba(255, 255, 255, 0.4)';
+                        const wd = liveWeatherData ? liveWeatherData[d.properties.ISO_A2] : null;
+                        if (wd) {
+                            const t = wd.temp;
+                            if (t < 0) return 'rgba(59, 130, 246, 0.5)'; // 蓝 (寒冷)
+                            if (t < 15) return 'rgba(6, 182, 212, 0.5)'; // 青 (凉爽)
+                            if (t < 25) return 'rgba(34, 197, 94, 0.5)'; // 绿 (舒适)
+                            if (t < 35) return 'rgba(245, 158, 11, 0.5)'; // 琥珀 (炎热)
+                            return 'rgba(239, 68, 68, 0.5)'; // 红 (酷热)
+                        }
+                        return 'rgba(0, 0, 0, 0)';
+                    }
+                })
+                .polygonSideColor(() => currentGlobeMode === 'abstract' ? 'rgba(200, 200, 200, 0.2)' : 'rgba(0, 0, 0, 0)')
+                .polygonStrokeColor(d => {
+                    if (currentGlobeMode === 'abstract') return '#cbd5e1';
+                    // 真实地形和气象模式下：未选中隐藏网格
+                    const isSelected = d.properties.ISO_A2 === selectedCountryIso2;
+                    const isHovered = d.properties.ISO_A2 === hoverCountryIso2;
+                    if (isSelected || isHovered) return 'rgba(245, 158, 11, 0.8)';
+                    return 'rgba(0, 0, 0, 0)'; 
+                })
+                .polygonLabel(({ properties: d }) => `
+                    <div class="bg-white/90 text-slate-800 px-3 py-1.5 rounded-lg shadow-md border border-slate-200 text-sm font-bold backdrop-blur-sm relative z-50 pointer-events-none">
+                        ${d.ADMIN}
+                        ${cropDataByCountry[d.ISO_A2] ? '<br><span class="text-xs text-emerald-600 font-medium">点击查看优势作物</span>' : '<br><span class="text-xs text-slate-400 font-normal">无相关数据</span>'}
+                        ${currentGlobeMode === 'weather' && liveWeatherData && liveWeatherData[d.ISO_A2] ? `<br><span class="text-xs text-blue-500 font-normal">实时气温: ${liveWeatherData[d.ISO_A2].temp}°C</span>` : ''}
+                    </div>
+                `)
+                .onPolygonHover(hoverD => {
+                    hoverCountryIso2 = hoverD ? hoverD.properties.ISO_A2 : null;
+                    myGlobe.polygonAltitude(myGlobe.polygonAltitude());
+                    myGlobe.polygonCapColor(myGlobe.polygonCapColor());
+                    myGlobe.polygonStrokeColor(myGlobe.polygonStrokeColor()); 
+                })
+                .onPolygonClick(d => {
+                    const iso2 = d.properties.ISO_A2;
+                    if (cropDataByCountry[iso2]) {
+                        selectedCountryIso2 = iso2; 
+                        myGlobe.polygonAltitude(myGlobe.polygonAltitude());
+                        myGlobe.polygonCapColor(myGlobe.polygonCapColor());
+                        myGlobe.polygonStrokeColor(myGlobe.polygonStrokeColor()); 
+                        openCountryPanel(d.properties.ADMIN, iso2);
+                        saveRecentCountry(d.properties.ADMIN, iso2);
+                    }
+                })
+                // 设置气象标记的 HTML 渲染逻辑
+                .htmlLat(d => d.lat)
+                .htmlLng(d => d.lng)
+                .htmlElement(d => {
+                    const el = document.createElement('div');
+                    el.innerHTML = `
+                        <div class="flex flex-col items-center justify-center pointer-events-none transition-transform hover:scale-125">
+                            <span class="text-xl drop-shadow-md" style="text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${getWeatherEmoji(d.code)}</span>
+                            <span class="text-[10px] font-bold text-white drop-shadow-md bg-black/40 px-1 rounded">${d.temp}°C</span>
+                        </div>
+                    `;
+                    return el;
+                });
+
+            myGlobe.controls().autoRotate = true;
+            myGlobe.controls().autoRotateSpeed = 0.5;
+            myGlobe.pointOfView({ lat: 35, lng: 105, altitude: 2 });
+
+            window.addEventListener('resize', () => {
+                myGlobe.width(window.innerWidth).height(window.innerHeight);
+            });
+            
+            const scene = myGlobe.scene();
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+            scene.add(ambientLight);
+        }
+
+        // --- 地图模式切换逻辑 ---
+        async function setGlobeMode(mode) {
+            currentGlobeMode = mode;
+            
+            ['abstract', 'satellite', 'weather'].forEach(m => {
+                const btn = document.getElementById(`btn-mode-${m}`);
+                if (m === mode) {
+                    btn.className = 'px-4 py-2 rounded-full text-sm font-bold transition-all bg-emerald-500 text-white shadow-sm flex items-center gap-2';
+                } else {
+                    btn.className = 'px-4 py-2 rounded-full text-sm font-bold transition-all text-slate-600 bg-white/50 hover:bg-white/80 flex items-center gap-2';
+                }
+            });
+
+            if (mode === 'weather') {
+                if (!liveWeatherData) await fetchLiveWeather();
+                myGlobe.globeImageUrl(MARBLE_IMG);
+                myGlobe.backgroundColor('#0f172a');
+                // 渲染实时天气图标
+                myGlobe.htmlElementsData(Object.values(liveWeatherData));
+            } else if (mode === 'satellite') {
+                myGlobe.globeImageUrl(MARBLE_IMG);
+                myGlobe.backgroundColor('#0f172a');
+                myGlobe.htmlElementsData([]); // 清空图标
+            } else {
+                myGlobe.globeImageUrl(WATER_IMG);
+                myGlobe.backgroundColor('#f8fafc');
+                myGlobe.htmlElementsData([]); // 清空图标
+            }
+            
+            myGlobe.polygonCapColor(myGlobe.polygonCapColor());
+            myGlobe.polygonSideColor(myGlobe.polygonSideColor());
+            myGlobe.polygonStrokeColor(myGlobe.polygonStrokeColor());
+        }
+
+        // --- UI 交互逻辑 (侧边栏 / 面板) ---
+        function openCountryPanel(countryName, iso2) {
+            myGlobe.controls().autoRotate = false;
+            const panel = document.getElementById('countryPanel');
+            document.getElementById('countryTitleText').innerText = countryName;
+            
+            const listContainer = document.getElementById('cropsList');
+            listContainer.innerHTML = ''; 
+
+            const crops = cropDataByCountry[iso2];
+            const sortedCrops = Object.entries(crops).sort((a, b) => b[1] - a[1]);
+
+            sortedCrops.forEach(([cropCode, area]) => {
+                const zhName = cropTranslations[cropCode] || cropCode;
+                const areaStr = Math.round(area).toLocaleString() + ' ha';
+                
+                const hash = cropCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+                const colors = ['from-emerald-400 to-teal-500', 'from-amber-400 to-orange-500', 'from-blue-400 to-indigo-500', 'from-lime-400 to-green-500'];
+                const colorClass = colors[hash % colors.length];
+
+                const cardHtml = `
+                    <div onclick="openCropModal('${cropCode}', '${zhName}', '${countryName}')" 
+                         class="cursor-pointer group relative overflow-hidden rounded-2xl p-4 shadow-sm hover:shadow-md transition-all duration-300 border border-slate-100 bg-white">
+                        <div class="absolute inset-0 bg-gradient-to-br ${colorClass} opacity-10 group-hover:opacity-20 transition-opacity"></div>
+                        <div class="relative z-10">
+                            <h4 class="font-bold text-lg text-slate-800">${zhName}</h4>
+                            <p class="text-xs text-slate-500 uppercase tracking-wider mt-1">${cropCode}</p>
+                            <div class="mt-3 inline-block px-2 py-1 bg-slate-100 text-slate-700 text-xs rounded-md font-mono font-bold">
+                                ${areaStr}
+                            </div>
+                        </div>
+                        <div class="absolute right-3 bottom-3 text-slate-300 group-hover:text-indigo-500 group-hover:translate-x-1 transition-all">
+                            <span class="text-xl opacity-0 group-hover:opacity-100 transition-opacity mr-1">✨</span>
+                            <i data-lucide="arrow-right" class="w-5 h-5 inline-block"></i>
+                        </div>
+                    </div>
+                `;
+                listContainer.insertAdjacentHTML('beforeend', cardHtml);
+            });
+
+            if(window.lucide) lucide.createIcons();
+            panel.classList.add('active');
+        }
+
+        function closeCountryPanel() {
+            document.getElementById('countryPanel').classList.remove('active');
+            myGlobe.controls().autoRotate = true; 
+            selectedCountryIso2 = null; 
+            myGlobe.polygonAltitude(myGlobe.polygonAltitude()); 
+            myGlobe.polygonCapColor(myGlobe.polygonCapColor()); 
+            myGlobe.polygonStrokeColor(myGlobe.polygonStrokeColor()); 
+        }
+
+        // --- UI 交互逻辑 (作物详情弹窗 - 现接入大模型) ---
+        let currentCropDetails = null;
+
+        async function openCropModal(cropCode, zhName, countryName) {
+            const modal = document.getElementById('cropModal');
+            
+            document.getElementById('modalCropName').innerHTML = `
+                <span class="p-2 bg-emerald-100 text-emerald-600 rounded-xl shadow-inner"><i data-lucide="sprout"></i></span>
+                ${zhName} <span class="text-sm text-slate-500 font-medium ml-2">in ${countryName}</span>
+            `;
+            
+            document.getElementById('modalContentArea').classList.add('hidden');
+            document.getElementById('aiLoadingArea').classList.remove('hidden');
+            
+            const flipper = modal.querySelector('.transform-style-3d');
+            if (flipper.classList.contains('rotate-y-180')) {
+                flipper.classList.remove('rotate-y-180');
+            }
+
+            modal.classList.add('active');
+            if(window.lucide) lucide.createIcons();
+
+            const cacheKey = `${countryName}-${cropCode}`;
+            
+            if (!aiCache[cacheKey]) {
+                try {
+                    aiCache[cacheKey] = await generateCropDataWithAI(zhName, countryName);
+                } catch (e) {
+                    console.error("AI API 调用失败，降级使用兜底数据", e);
+                    aiCache[cacheKey] = cropDetailsMockFallback['default'];
+                }
+            }
+
+            currentCropDetails = aiCache[cacheKey];
+            
+            renderTimeline(0); 
+            document.getElementById('historyTitle').innerText = currentCropDetails.history.title;
+            document.getElementById('historyContent').innerText = currentCropDetails.history.content;
+            
+            document.getElementById('aiLoadingArea').classList.add('hidden');
+            document.getElementById('modalContentArea').classList.remove('hidden');
+        }
+
+        function closeCropModal() {
+            document.getElementById('cropModal').classList.remove('active');
+        }
+
+        function renderTimeline(selectedIndex) {
+            const container = document.getElementById('timelineContainer');
+            container.innerHTML = '';
+            
+            currentCropDetails.stages.forEach((stage, index) => {
+                const isActive = index === selectedIndex;
+                const disease = currentCropDetails.diseases[index];
+                
+                const nodeHtml = `
+                    <div class="relative flex items-center gap-4 mb-8 cursor-pointer group" onclick="renderTimeline(${index})">
+                        <div class="w-8 h-8 rounded-full border-4 flex items-center justify-center bg-white z-10 transition-colors
+                                  ${isActive ? 'border-indigo-500 text-indigo-500' : 'border-slate-200 text-transparent group-hover:border-indigo-300'}">
+                            <div class="w-2 h-2 bg-current rounded-full"></div>
+                        </div>
+                        <div class="flex-1 p-3 rounded-xl transition-all border
+                                  ${isActive ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-white border-slate-100 group-hover:bg-slate-50'}">
+                            <h5 class="text-sm font-bold ${isActive ? 'text-indigo-800' : 'text-slate-600'}">${stage}</h5>
+                            <p class="text-xs mt-1 ${isActive ? 'text-rose-600 font-bold' : 'text-slate-500'} flex items-center gap-1">
+                                <i data-lucide="bug" class="w-3 h-3"></i> ${disease}
+                            </p>
+                        </div>
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', nodeHtml);
+            });
+            
+            if(window.lucide) lucide.createIcons();
+
+            const prevText = document.getElementById('preventionText');
+            prevText.style.opacity = 0;
+            setTimeout(() => {
+                prevText.innerText = currentCropDetails.prevention[selectedIndex];
+                prevText.style.opacity = 1;
+            }, 150);
+        }
+
+        // --- 本地存储 (LocalStorage) ---
+        function saveRecentCountry(name, iso2) {
+            let recent = JSON.parse(localStorage.getItem('recentCountries') || '[]');
+            recent = recent.filter(c => c.iso2 !== iso2);
+            recent.unshift({ name, iso2 });
+            if (recent.length > 3) recent.pop();
+            
+            localStorage.setItem('recentCountries', JSON.stringify(recent));
+            renderRecentCountries();
+        }
+
+        function renderRecentCountries() {
+            const container = document.getElementById('recentCountries');
+            const recent = JSON.parse(localStorage.getItem('recentCountries') || '[]');
+            if (recent.length === 0) return;
+            
+            container.innerHTML = '';
+            recent.forEach(c => {
+                const btn = document.createElement('button');
+                btn.className = 'px-2 py-0.5 bg-white hover:bg-emerald-50 hover:text-emerald-600 text-slate-700 rounded text-[10px] transition border border-slate-200 shadow-sm font-bold';
+                btn.innerText = c.name;
+                btn.onclick = () => {
+                    if (cropDataByCountry[c.iso2]) {
+                        const targetPolygons = countriesGeoJson.features.filter(f => f.properties.ISO_A2 === c.iso2);
+                        if(targetPolygons.length > 0) {
+                             const coords = targetPolygons[0].geometry.coordinates[0][0][0] || targetPolygons[0].geometry.coordinates[0][0];
+                             if(coords && coords.length === 2) {
+                                myGlobe.pointOfView({ lng: coords[0], lat: coords[1], altitude: 1.5 }, 1000);
+                             }
+                        }
+                        selectedCountryIso2 = c.iso2; 
+                        myGlobe.polygonAltitude(myGlobe.polygonAltitude());
+                        myGlobe.polygonCapColor(myGlobe.polygonCapColor()); 
+                        myGlobe.polygonStrokeColor(myGlobe.polygonStrokeColor());
+                        openCountryPanel(c.name, c.iso2);
+                    }
+                };
+                container.appendChild(btn);
+            });
+        }
+
+        // --- AI 问答模块逻辑 ---
+        function toggleChat() {
+            const panel = document.getElementById('aiChatPanel');
+            if (panel.classList.contains('opacity-0')) {
+                panel.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
+                document.getElementById('chatInput').focus();
+            } else {
+                panel.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
+            }
+        }
+
+        async function sendChatMessage() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (!message) return;
+
+            appendChatMessage('user', message);
+            input.value = '';
+            
+            const typingId = 'typing-' + Date.now();
+            appendChatMessage('system', '<i data-lucide="loader-2" class="w-4 h-4 animate-spin inline-block align-middle"></i> 思考中...', typingId);
+            if(window.lucide) lucide.createIcons();
+
+            try {
+                const prompt = `你是一个资深的农业专家。请用简洁专业的中文回答用户的提问。\n用户提问：${message}`;
+                const payload = {
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { maxOutputTokens: 500 }
+                };
+
+                const result = await fetchWithRetry(endpointUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+
+                const textResponse = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                const typingEl = document.getElementById(typingId);
+                if (typingEl) typingEl.remove();
+
+                if (textResponse) {
+                    const formattedRes = textResponse.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+                    appendChatMessage('ai', formattedRes);
+                } else {
+                    appendChatMessage('error', '抱歉，未能获取到有效回答。');
+                }
+            } catch (e) {
+                const typingEl = document.getElementById(typingId);
+                if (typingEl) typingEl.remove();
+                appendChatMessage('error', '抱歉，AI 暂时无法回答，请检查网络或稍后再试。');
+            }
+        }
+
+        function appendChatMessage(role, text, id = null) {
+            const history = document.getElementById('chatHistory');
+            const div = document.createElement('div');
+            if (id) div.id = id;
+            div.className = `flex items-start gap-2 ${role === 'user' ? 'justify-end' : ''}`;
+            
+            let bubbleClass = '';
+            if (role === 'user') {
+                bubbleClass = 'bg-indigo-500 text-white rounded-tr-none';
+            } else if (role === 'error') {
+                bubbleClass = 'bg-red-50 text-red-700 border border-red-100 rounded-tl-none';
+            } else if (role === 'system') {
+                bubbleClass = 'bg-slate-50 text-slate-500 italic text-xs rounded-tl-none';
+            } else {
+                bubbleClass = 'bg-white border border-slate-100 shadow-sm text-slate-700 rounded-tl-none';
+            }
+
+            div.innerHTML = `<div class="p-3 rounded-2xl max-w-[85%] leading-relaxed ${bubbleClass}">${text}</div>`;
+            history.appendChild(div);
+            history.scrollTop = history.scrollHeight;
+        }
+
+        // 启动应用
+        window.onload = init;
+
+    </script>
+</body>
+</html>
