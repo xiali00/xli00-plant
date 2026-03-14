@@ -56,18 +56,18 @@
     <div id="globeViz" class="absolute inset-0 z-0 cursor-move"></div>
 
     <!-- 顶部导航栏 / 控制面板 -->
-    <header class="fixed top-0 left-0 w-full z-10 pointer-events-none p-4 flex justify-between items-start md:items-center flex-col md:flex-row gap-4">
+    <header class="fixed top-0 left-0 w-full z-40 pointer-events-none p-4 flex justify-between items-start md:items-center flex-col md:flex-row gap-4">
         <div class="glass px-6 py-3 rounded-2xl shadow-md pointer-events-auto">
             <h1 class="text-xl md:text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-600 to-teal-600 flex items-center gap-2">
                 <i data-lucide="leaf" class="w-6 h-6 text-emerald-500"></i>
                 全球作物易发病害
             </h1>
-            <p class="text-xs text-slate-500 mt-1 font-medium">探索各国优势作物，结合 Gemini大模型进行农业病害推演</p>
+            <p class="text-xs text-slate-500 mt-1 font-medium">探索各国作物，结合AI进行农业病害推演</p>
             <!-- 数据来源致谢声明 -->
             <p class="text-[10px] text-slate-400 mt-1.5">
                 数据来源详见 
                 <a href="https://www.nature.com/articles/s41597-024-03259-0" target="_blank" class="text-emerald-500 hover:text-emerald-600 underline decoration-emerald-500/30 underline-offset-2 transition-colors pointer-events-auto">
-                    CROPGRIDS: a global geo-referenced dataset of 173 crops | Scientific Data
+                    CROPGRIDS（2020）
                 </a>
             </p>
         </div>
@@ -92,7 +92,7 @@
     </div>
 
     <!-- 国家详情面板 -->
-    <aside id="countryPanel" class="glass shadow-2xl flex flex-col slide-up md:slide-right fixed bottom-0 md:bottom-auto md:top-0 md:right-0 w-full md:w-[400px] h-[60vh] md:h-full z-20 rounded-t-3xl md:rounded-none md:rounded-l-3xl">
+    <aside id="countryPanel" class="glass shadow-2xl flex flex-col slide-up md:slide-right fixed bottom-0 md:bottom-auto md:top-0 md:right-0 w-full md:w-[400px] h-[60vh] md:h-full z-40 rounded-t-3xl md:rounded-none md:rounded-l-3xl">
         <!-- 面板头部 -->
         <div class="p-6 border-b border-slate-200/50 flex justify-between items-center relative bg-white/50 rounded-t-3xl md:rounded-none md:rounded-tl-3xl">
             <div class="w-12 h-1.5 bg-slate-300 rounded-full absolute top-3 left-1/2 -translate-x-1/2 md:hidden"></div>
@@ -116,7 +116,7 @@
     </aside>
 
     <!-- 作物详情与病害弹窗 -->
-    <div id="cropModal" class="fade-in fixed inset-0 z-30 flex items-center justify-center p-4">
+    <div id="cropModal" class="fade-in fixed inset-0 z-50 flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onclick="closeCropModal()"></div>
         <div class="bg-white/95 backdrop-blur-xl w-full max-w-4xl max-h-[90vh] rounded-3xl shadow-2xl relative flex flex-col overflow-hidden z-40">
             
@@ -139,7 +139,7 @@
                         <span class="text-3xl">✨</span>
                     </div>
                 </div>
-                <h4 class="text-xl font-bold text-slate-700 mb-2" id="aiLoadingStatus">正在召唤 Gemini 农业专家...</h4>
+                <h4 class="text-xl font-bold text-slate-700 mb-2" id="aiLoadingStatus">正在召唤AI农业专家...</h4>
                 <p class="text-slate-500 text-sm font-medium">正在针对该国气候定制生成病害时间轴和历史事件</p>
                 <div class="w-64 h-2 bg-slate-100 rounded-full mt-6 overflow-hidden">
                     <div class="h-full bg-indigo-500 rounded-full shimmer w-full"></div>
@@ -180,7 +180,7 @@
                             <!-- 卡片正面 -->
                             <div class="absolute inset-0 backface-hidden bg-gradient-to-br from-amber-100 to-orange-50 rounded-3xl p-6 flex flex-col items-center justify-center text-center shadow-lg border border-amber-200/50">
                                 <div class="absolute top-4 left-4 bg-amber-200/50 text-amber-700 px-2 py-1 rounded-md text-xs font-bold flex items-center gap-1 shadow-sm">
-                                    ✨ 由 Gemini 生成
+                                    ✨ 由 AI 生成
                                 </div>
                                 <div class="w-16 h-16 bg-amber-200 text-amber-600 rounded-full flex items-center justify-center mb-4 shadow-inner">
                                     <i data-lucide="help-circle" class="w-8 h-8"></i>
@@ -210,12 +210,55 @@
     </div>
 
     <!-- AI 助手切换按钮 (左下角) -->
-    <button onclick="toggleChat()" class="fixed bottom-6 left-6 z-20 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full p-4 shadow-xl flex items-center justify-center transition-transform hover:scale-105 pointer-events-auto">
+    <button onclick="toggleChat()" class="fixed bottom-6 left-6 z-40 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full p-4 shadow-xl flex items-center justify-center transition-transform hover:scale-105 pointer-events-auto" title="AI 问答">
         <i data-lucide="bot" class="w-6 h-6"></i>
     </button>
 
+    <!-- API 设置面板按钮 -->
+    <button onclick="toggleApiSettings()" class="fixed bottom-[88px] left-6 z-40 bg-slate-700 hover:bg-slate-800 text-white rounded-full p-3.5 shadow-xl flex items-center justify-center transition-transform hover:scale-105 pointer-events-auto" title="配置 AI API">
+        <i data-lucide="key" class="w-5 h-5"></i>
+    </button>
+
+    <!-- API 设置面板 -->
+    <div id="apiSettingsPanel" class="glass shadow-2xl flex flex-col fixed bottom-[88px] left-20 w-[320px] z-50 rounded-2xl overflow-hidden transition-all duration-300 opacity-0 pointer-events-none -translate-x-4 max-w-[calc(100vw-6rem)]">
+        <div class="p-4 border-b border-slate-200/50 bg-gradient-to-r from-slate-100 to-slate-200 flex justify-between items-center">
+            <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                <i data-lucide="settings-2" class="w-4 h-4"></i> 自定义大模型 API
+            </h3>
+            <button onclick="toggleApiSettings()" class="p-1 hover:bg-slate-300 rounded-md text-slate-600 transition">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div class="p-5 bg-white/80 text-sm space-y-3">
+            <div>
+                <label class="block text-slate-700 font-bold mb-1.5">选择模型服务商</label>
+                <select id="aiProvider" class="w-full border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-slate-50">
+                    <option value="gemini">Google Gemini</option>
+                    <option value="openai">ChatGPT (OpenAI)</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="qwen">通义千问 (Qwen)</option>
+                    <option value="hunyuan">腾讯混元 (Hunyuan)</option>
+                    <option value="doubao">字节豆包 (Doubao)</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-slate-700 font-bold mb-1.5">API Key</label>
+                <input type="password" id="apiKeyInput" class="w-full border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-slate-50" placeholder="填写您的密钥 (sk-...)">
+            </div>
+            <div>
+                <label class="block text-slate-700 font-bold mb-1.5">自定义模型名 <span class="text-xs font-normal text-slate-400">(选填)</span></label>
+                <input type="text" id="apiModelInput" class="w-full border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-slate-50" placeholder="例如: qwen-plus">
+                <p class="text-[10px] text-slate-500 mt-1.5 leading-tight">留空使用默认。<b>注意：</b>使用豆包 API 时，此处必须填入火山引擎中创建的接入点ID(ep-...)。</p>
+            </div>
+            <button onclick="saveApiSettings()" class="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2.5 rounded-xl transition-colors shadow-sm mt-2">
+                保存配置
+            </button>
+            <div id="apiSaveToast" class="text-emerald-600 text-xs font-bold text-center opacity-0 transition-opacity">已保存！</div>
+        </div>
+    </div>
+
     <!-- 模式切换面板 (底部中央) -->
-    <div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 glass rounded-full p-1.5 flex gap-1 shadow-xl pointer-events-auto">
+    <div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 glass rounded-full p-1.5 flex gap-1 shadow-xl pointer-events-auto">
         <button onclick="setGlobeMode('abstract')" id="btn-mode-abstract" class="px-4 py-2 rounded-full text-sm font-bold transition-all bg-emerald-500 text-white shadow-sm flex items-center gap-2">
             <i data-lucide="globe-2" class="w-4 h-4"></i> 抽象分布
         </button>
@@ -228,7 +271,7 @@
     </div>
 
     <!-- AI 问答面板 -->
-    <div id="aiChatPanel" class="glass shadow-2xl flex flex-col fixed bottom-24 left-6 w-[350px] h-[500px] z-20 rounded-2xl overflow-hidden transition-all duration-300 opacity-0 pointer-events-none translate-y-4 max-w-[calc(100vw-3rem)]">
+    <div id="aiChatPanel" class="glass shadow-2xl flex flex-col fixed bottom-24 left-6 w-[350px] h-[500px] z-50 rounded-2xl overflow-hidden transition-all duration-300 opacity-0 pointer-events-none translate-y-4 max-w-[calc(100vw-3rem)]">
         <div class="p-4 border-b border-slate-200/50 bg-gradient-to-r from-indigo-50 to-purple-50 flex justify-between items-center">
             <h3 class="font-bold text-indigo-800 flex items-center gap-2">
                 <i data-lucide="bot" class="w-5 h-5"></i> 农学 AI 助手
@@ -244,7 +287,8 @@
                 </div>
             </div>
         </div>
-        <div class="p-3 bg-white border-t border-slate-100 flex gap-2 items-center pointer-events-auto">
+        <!-- 修复：移除了多余的 pointer-events-auto，防止其在隐藏时阻挡钥匙按钮的点击 -->
+        <div class="p-3 bg-white border-t border-slate-100 flex gap-2 items-center">
             <input type="text" id="chatInput" class="flex-1 border border-slate-300 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-slate-50" placeholder="向 AI 提问..." onkeydown="if(event.key === 'Enter') sendChatMessage()">
             <button onclick="sendChatMessage()" class="bg-indigo-600 hover:bg-indigo-700 text-white p-2.5 rounded-xl transition-colors shadow-sm">
                 <i data-lucide="send" class="w-4 h-4"></i>
@@ -459,16 +503,14 @@ EH,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,219 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,
 YE,0 ,0 ,17369 ,5499 ,0 ,2089 ,698 ,0 ,0 ,0 ,0 ,0 ,9418 ,28792 ,1563 ,0 ,0 ,0 ,0 ,4721 ,0 ,747 ,0 ,0 ,0 ,1529 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,19709 ,0 ,2857 ,0 ,35 ,0 ,0 ,0 ,0 ,37121 ,9678 ,0 ,0 ,937 ,0 ,15035 ,593 ,0 ,528 ,0 ,0 ,85 ,8573 ,471 ,0 ,0 ,12264 ,0 ,13988 ,451 ,0 ,0 ,0 ,0 ,1513 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,2393 ,9459 ,296 ,0 ,0 ,37154 ,0 ,23610 ,0 ,3548 ,0 ,84063 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,4267 ,0 ,15719 ,8128 ,1689 ,1585 ,2654 ,142 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,15733 ,10427 ,1511 ,0 ,315 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,20127 ,0 ,285030 ,24317 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,1 ,0 ,0 ,0 ,41 ,1507 ,0 ,0 ,13623 ,7326 ,0 ,450 ,0 ,0 ,0 ,4852 ,3036 ,0 ,0 ,9462 ,53187 ,0 ,0 
 ZM,0 ,0 ,0 ,0 ,2 ,0 ,0 ,0 ,0 ,0 ,35 ,22 ,164 ,1245 ,8321 ,0 ,0 ,0 ,0 ,0 ,0 ,94 ,0 ,0 ,0 ,0 ,0 ,311 ,0 ,138996 ,35 ,0 ,40 ,0 ,0 ,336 ,0 ,0 ,0 ,48 ,26 ,0 ,37 ,798 ,7275 ,70601 ,2438 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,0 ,5703 ,1 ,0 ,0 ,6 ,7 ,0 ,1 ,0 ,15 ,20 ,2 ,195548 ,0 ,0 ,0 ,0 ,0 ,56 ,0 ,0 ,0 ,0 ,0 ,0 ,4 ,14 ,1 ,0 ,0 ,1320334 ,0 ,302 ,0 ,0 ,401 ,64095 ,0 ,0 ,0 ,0 ,10 ,77 ,0 ,1 ,0 ,318 ,0 ,0 ,2531 ,926 ,76 ,482 ,0 ,0 ,72 ,0 ,0 ,2687 ,601 ,69 ,0 ,1036 ,0 ,0 ,0 ,2657 ,60934 ,14 ,23 ,0 ,0 ,0 ,0 ,0 ,24733 ,72 ,150 ,0 ,0 ,28 ,290 ,119 ,34704 ,0 ,0 ,208608 ,2641 ,0 ,0 ,0 ,0 ,0 ,46284 ,0 ,95467 ,0 ,52097 ,0 ,73 ,690 ,15762 ,2631 ,0 ,18664 ,102 ,0 ,2 ,32046 ,50247 ,0 ,0 ,0 ,25906 ,35 ,0 
 ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0 ,0 ,2 ,29 ,0 ,0 ,0 ,11 ,0 ,315 ,0 ,54654 ,20 ,0 ,1766 ,0 ,0 ,121 ,7 ,0 ,0 ,89 ,0 ,0 ,0 ,6 ,2105 ,110119 ,2210 ,0 ,86 ,0 ,0 ,0 ,4 ,1 ,0 ,0 ,0 ,586 ,0 ,0 ,0 ,408 ,910 ,0 ,659 ,0 ,1701 ,0 ,358 ,155734 ,0 ,0 ,0 ,1 ,4118 ,40 ,0 ,0 ,0 ,0 ,0 ,0 ,2583 ,0 ,24 ,0 ,25 ,1030889 ,0 ,723 ,0 ,22 ,0 ,137028 ,0 ,460 ,0 ,0 ,0 ,3036 ,273 ,0 ,0 ,22630 ,0 ,0 ,215 ,13209 ,13 ,1 ,188 ,103 ,1421 ,0 ,0 ,0 ,9847 ,18 ,0 ,0 ,73 ,0 ,0 ,2453 ,5678 ,32 ,0 ,0 ,0 ,0 ,0 ,40 ,3299 ,123 ,0 ,40 ,0 ,0 ,40 ,23 ,220996 ,0 ,0 ,33560 ,571 ,0 ,6 ,42 ,0 ,0 ,46514 ,0 ,24528 ,0 ,8866 ,1661 ,0 ,2709 ,105190 ,3275 ,0 ,173 ,0 ,0 ,19 ,17463 ,27094 ,0 ,0 ,7 ,73180 ,170 ,0 
+
     </script>
 
     <script>
         // 初始化图标
         try { lucide.createIcons(); } catch (e) { console.warn("Lucide icons pending."); }
 
-        // --- Gemini API 配置与逻辑 ---
-        const apiKey = ""; // 执行环境会在运行时自动提供此密钥
-        const endpointUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-        
+        // --- AI API 配置与逻辑 ---
         // 缓存对象，防止多次点击重复调用 API
         const aiCache = {};
         
@@ -483,13 +525,102 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
             for (let i = 0; i < maxRetries; i++) {
                 try {
                     const res = await fetch(url, options);
-                    if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(`HTTP ${res.status}: ${errText}`);
+                    }
                     return await res.json();
                 } catch (err) {
                     if (i === maxRetries - 1) throw err;
                     await delay(delays[i]);
                 }
             }
+        }
+
+        // 统一的大模型调用逻辑，支持切换服务商
+        async function callLLM(prompt, isJson = false) {
+            const provider = localStorage.getItem('aiProvider') || 'gemini';
+            let key = localStorage.getItem('apiKey') || '';
+            let customModel = localStorage.getItem('apiModel') || '';
+            
+            // 环境兜底：如果没有配置 Key 且选用 Gemini，使用沙盒测试环境的 Key
+            if (!key && provider === 'gemini') {
+                key = ""; 
+            }
+            if (!key && provider !== 'gemini') {
+                throw new Error("请先点击左下角 🔑 按钮配置您的 API Key！");
+            }
+
+            let endpoint, headers, body, modelName;
+
+            if (provider === 'gemini') {
+                endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`;
+                headers = { "Content-Type": "application/json" };
+                const payload = { contents: [{ parts: [{ text: prompt }] }] };
+                if (isJson) payload.generationConfig = { responseMimeType: "application/json" };
+                body = JSON.stringify(payload);
+            } else {
+                // OpenAI 兼容接口标准逻辑
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${key}`
+                };
+                
+                if (provider === 'openai') {
+                    endpoint = 'https://api.openai.com/v1/chat/completions';
+                    modelName = customModel || "gpt-4o-mini";
+                } else if (provider === 'deepseek') {
+                    endpoint = 'https://api.deepseek.com/chat/completions';
+                    modelName = customModel || "deepseek-chat";
+                } else if (provider === 'qwen') {
+                    endpoint = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+                    modelName = customModel || "qwen-plus";
+                } else if (provider === 'hunyuan') {
+                    endpoint = 'https://api.hunyuan.cloud.tencent.com/v1/chat/completions';
+                    modelName = customModel || "hunyuan-standard";
+                } else if (provider === 'doubao') {
+                    endpoint = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+                    modelName = customModel;
+                    if (!modelName) throw new Error("使用豆包 API 请务必在设置中填写模型接入点 ID (ep-...)");
+                }
+
+                const payload = {
+                    model: modelName,
+                    messages: [{ role: "user", content: prompt }]
+                };
+
+                // 部分模型强制 JSON 格式输出支持
+                if (isJson && ['openai', 'deepseek', 'qwen'].includes(provider)) {
+                    payload.response_format = { type: "json_object" };
+                }
+
+                body = JSON.stringify(payload);
+            }
+
+            const result = await fetchWithRetry(endpoint, { method: "POST", headers, body });
+
+            let textResponse = "";
+            if (provider === 'gemini') {
+                textResponse = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            } else {
+                if (result.error) throw new Error(result.error.message);
+                textResponse = result.choices?.[0]?.message?.content;
+            }
+
+            if (!textResponse) throw new Error("API 未返回有效内容");
+            
+            if (isJson) {
+                // 剔除可能存在的 markdown 代码块包裹，确保 JSON 解析成功
+                let cleanText = textResponse.trim();
+                const codeBlockRegexStart = new RegExp('^`{3}(?:json)?\\n?', 'i');
+                const codeBlockRegexEnd = new RegExp('\\n?`{3}$', 'i');
+                // 仅当包含三个反引号时清理
+                if (cleanText.includes('`' + '``')) {
+                    cleanText = cleanText.replace(codeBlockRegexStart, '').replace(codeBlockRegexEnd, '');
+                }
+                return JSON.parse(cleanText);
+            }
+            return textResponse;
         }
 
         async function generateCropDataWithAI(cropName, countryName) {
@@ -505,20 +636,7 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                 }
             }`;
 
-            const payload = {
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { responseMimeType: "application/json" }
-            };
-
-            const result = await fetchWithRetry(endpointUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
-            });
-
-            const textResponse = result.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (!textResponse) throw new Error("Gemini returned no text.");
-            return JSON.parse(textResponse);
+            return await callLLM(prompt, true);
         }
 
         // --- 数据字典与配置 ---
@@ -649,11 +767,10 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                     }
                 }
 
-                // 3. 多备用 CDN 尝试获取 GeoJSON，增强稳定性，增加 jsdelivr 优先级
                 const geoJsonUrls = [
                     'https://cdn.jsdelivr.net/npm/three-globe/example/datasets/ne_110m_admin_0_countries.geojson',
-                    'https://raw.githubusercontent.com/vasturiano/globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson',
-                    'https://unpkg.com/three-globe/example/datasets/ne_110m_admin_0_countries.geojson'
+                    'https://unpkg.com/three-globe/example/datasets/ne_110m_admin_0_countries.geojson',
+                    'https://raw.githubusercontent.com/vasturiano/globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson'
                 ];
 
                 for (const url of geoJsonUrls) {
@@ -662,7 +779,6 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                         const res = await fetch(url);
                         if (res.ok) {
                             const data = await res.json();
-                            // 确保数据完整性
                             if (data && data.features) {
                                 countriesGeoJson = data;
                                 break;
@@ -688,7 +804,6 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
 
             } catch (error) {
                 console.error("初始化失败:", error);
-                // 优化错误展示面板：直接把具体的 errorMessage 打印在界面上，方便排查
                 document.getElementById('loading').innerHTML = `
                     <div class="bg-white p-6 rounded-xl shadow-xl text-center max-w-sm mx-auto">
                         <i data-lucide="alert-triangle" class="w-12 h-12 text-rose-500 mx-auto mb-3"></i>
@@ -711,14 +826,12 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
 
             liveWeatherData = {};
             
-            // 提取有数据的国家的近似中心点
             const targets = countriesGeoJson.features
                 .filter(f => cropDataByCountry[f.properties.ISO_A2])
                 .map(f => {
                     return { iso2: f.properties.ISO_A2, ...getCountryCenter(f) };
                 });
 
-            // 根据 API 限制 (每次请求最多 100 个坐标)，进行分块请求
             const chunks = [];
             for (let i = 0; i < targets.length; i += 100) chunks.push(targets.slice(i, i + 100));
 
@@ -779,22 +892,20 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                         if (isHovered) return '#fbbf24'; 
                         return hasData ? '#6ee7b7' : '#f1f5f9';
                     } else if (currentGlobeMode === 'satellite') {
-                        // 真实地形模式：未选中完全透明
                         if (isSelected) return 'rgba(245, 158, 11, 0.7)'; 
                         if (isHovered) return 'rgba(251, 191, 36, 0.4)';
                         return 'rgba(0, 0, 0, 0)'; 
                     } else if (currentGlobeMode === 'weather') {
-                        // 实时气象模式：根据温度渲染热力色彩
                         if (isSelected) return 'rgba(255, 255, 255, 0.8)';
                         if (isHovered) return 'rgba(255, 255, 255, 0.4)';
                         const wd = liveWeatherData ? liveWeatherData[d.properties.ISO_A2] : null;
                         if (wd) {
                             const t = wd.temp;
-                            if (t < 0) return 'rgba(59, 130, 246, 0.5)'; // 蓝 (寒冷)
-                            if (t < 15) return 'rgba(6, 182, 212, 0.5)'; // 青 (凉爽)
-                            if (t < 25) return 'rgba(34, 197, 94, 0.5)'; // 绿 (舒适)
-                            if (t < 35) return 'rgba(245, 158, 11, 0.5)'; // 琥珀 (炎热)
-                            return 'rgba(239, 68, 68, 0.5)'; // 红 (酷热)
+                            if (t < 0) return 'rgba(59, 130, 246, 0.5)';
+                            if (t < 15) return 'rgba(6, 182, 212, 0.5)';
+                            if (t < 25) return 'rgba(34, 197, 94, 0.5)';
+                            if (t < 35) return 'rgba(245, 158, 11, 0.5)';
+                            return 'rgba(239, 68, 68, 0.5)';
                         }
                         return 'rgba(0, 0, 0, 0)';
                     }
@@ -802,7 +913,6 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                 .polygonSideColor(() => currentGlobeMode === 'abstract' ? 'rgba(200, 200, 200, 0.2)' : 'rgba(0, 0, 0, 0)')
                 .polygonStrokeColor(d => {
                     if (currentGlobeMode === 'abstract') return '#cbd5e1';
-                    // 真实地形和气象模式下：未选中隐藏网格
                     const isSelected = d.properties.ISO_A2 === selectedCountryIso2;
                     const isHovered = d.properties.ISO_A2 === hoverCountryIso2;
                     if (isSelected || isHovered) return 'rgba(245, 158, 11, 0.8)';
@@ -832,7 +942,6 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                         saveRecentCountry(d.properties.ADMIN, iso2);
                     }
                 })
-                // 设置气象标记的 HTML 渲染逻辑
                 .htmlLat(d => d.lat)
                 .htmlLng(d => d.lng)
                 .htmlElement(d => {
@@ -876,16 +985,15 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
                 if (!liveWeatherData) await fetchLiveWeather();
                 myGlobe.globeImageUrl(MARBLE_IMG);
                 myGlobe.backgroundColor('#0f172a');
-                // 渲染实时天气图标
                 myGlobe.htmlElementsData(Object.values(liveWeatherData));
             } else if (mode === 'satellite') {
                 myGlobe.globeImageUrl(MARBLE_IMG);
                 myGlobe.backgroundColor('#0f172a');
-                myGlobe.htmlElementsData([]); // 清空图标
+                myGlobe.htmlElementsData([]); 
             } else {
                 myGlobe.globeImageUrl(WATER_IMG);
                 myGlobe.backgroundColor('#f8fafc');
-                myGlobe.htmlElementsData([]); // 清空图标
+                myGlobe.htmlElementsData([]); 
             }
             
             myGlobe.polygonCapColor(myGlobe.polygonCapColor());
@@ -1095,18 +1203,7 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
 
             try {
                 const prompt = `你是一个资深的农业专家。请用简洁专业的中文回答用户的提问。\n用户提问：${message}`;
-                const payload = {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { maxOutputTokens: 500 }
-                };
-
-                const result = await fetchWithRetry(endpointUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
-                });
-
-                const textResponse = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                const textResponse = await callLLM(prompt, false);
                 
                 const typingEl = document.getElementById(typingId);
                 if (typingEl) typingEl.remove();
@@ -1120,7 +1217,8 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
             } catch (e) {
                 const typingEl = document.getElementById(typingId);
                 if (typingEl) typingEl.remove();
-                appendChatMessage('error', '抱歉，AI 暂时无法回答，请检查网络或稍后再试。');
+                console.error(e);
+                appendChatMessage('error', `AI 请求失败: ${e.message || '请检查左下角的 API 设置。'}`);
             }
         }
 
@@ -1144,6 +1242,33 @@ ZW,0 ,0 ,58 ,0 ,116 ,748 ,21 ,0 ,11 ,64 ,620 ,0 ,23344 ,10027 ,24048 ,0 ,5 ,0 ,0
             div.innerHTML = `<div class="p-3 rounded-2xl max-w-[85%] leading-relaxed ${bubbleClass}">${text}</div>`;
             history.appendChild(div);
             history.scrollTop = history.scrollHeight;
+        }
+
+        // --- API 设置面板交互逻辑 ---
+        function toggleApiSettings() {
+            const panel = document.getElementById('apiSettingsPanel');
+            if (panel.classList.contains('opacity-0')) {
+                document.getElementById('aiProvider').value = localStorage.getItem('aiProvider') || 'gemini';
+                document.getElementById('apiKeyInput').value = localStorage.getItem('apiKey') || '';
+                document.getElementById('apiModelInput').value = localStorage.getItem('apiModel') || '';
+                panel.classList.remove('opacity-0', 'pointer-events-none', '-translate-x-4');
+            } else {
+                panel.classList.add('opacity-0', 'pointer-events-none', '-translate-x-4');
+            }
+        }
+
+        function saveApiSettings() {
+            const provider = document.getElementById('aiProvider').value;
+            const key = document.getElementById('apiKeyInput').value.trim();
+            const model = document.getElementById('apiModelInput').value.trim();
+            
+            localStorage.setItem('aiProvider', provider);
+            localStorage.setItem('apiKey', key);
+            localStorage.setItem('apiModel', model);
+            
+            const toast = document.getElementById('apiSaveToast');
+            toast.classList.remove('opacity-0');
+            setTimeout(() => toast.classList.add('opacity-0'), 2000);
         }
 
         // 启动应用
